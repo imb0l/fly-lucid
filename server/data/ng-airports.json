@@ -1,0 +1,184 @@
+[
+  {
+    "iata": "ABB",
+    "icao": "DNAS",
+    "name": "Asaba International Airport",
+    "lat": 6.204167,
+    "lon": 6.665278
+  },
+  {
+    "iata": "ABV",
+    "icao": "DNAA",
+    "name": "Nnamdi Azikiwe International Airport",
+    "lat": 9.00679,
+    "lon": 7.26317
+  },
+  {
+    "iata": "AKR",
+    "icao": "DNAK",
+    "name": "Akure Airport",
+    "lat": 7.246739864349365,
+    "lon": 5.3010101318359375
+  },
+  {
+    "iata": "BCU",
+    "icao": "DNBC",
+    "name": "Sir Abubakar Tafawa Balewa Bauchi State International Airport",
+    "lat": 10.482833,
+    "lon": 9.744
+  },
+  {
+    "iata": "BNI",
+    "icao": "DNBE",
+    "name": "Benin Airport",
+    "lat": 6.316979885101318,
+    "lon": 5.5995001792907715
+  },
+  {
+    "iata": "CBQ",
+    "icao": "DNCA",
+    "name": "Margaret Ekpo International Airport",
+    "lat": 4.976019859313965,
+    "lon": 8.347200393676758
+  },
+  {
+    "iata": "DKA",
+    "icao": "DN57",
+    "name": "Umaru Musa Yar'adua Airport",
+    "lat": 13.0078,
+    "lon": 7.66045
+  },
+  {
+    "iata": "ENU",
+    "icao": "DNEN",
+    "name": "Akanu Ibiam International Airport",
+    "lat": 6.473718,
+    "lon": 7.560463
+  },
+  {
+    "iata": "GMO",
+    "icao": "DNGO",
+    "name": "Gombe Lawanti International Airport",
+    "lat": 10.298889,
+    "lon": 10.9
+  },
+  {
+    "iata": "IBA",
+    "icao": "DNIB",
+    "name": "Ibadan Airport",
+    "lat": 7.362460136413574,
+    "lon": 3.97832989692688
+  },
+  {
+    "iata": "ILR",
+    "icao": "DNIL",
+    "name": "General Tunde Idiagbon International Airport",
+    "lat": 8.44021,
+    "lon": 4.49392
+  },
+  {
+    "iata": "JOS",
+    "icao": "DNJO",
+    "name": "Yakubu Gowon Airport",
+    "lat": 9.639829635620117,
+    "lon": 8.869050025939941
+  },
+  {
+    "iata": "KAD",
+    "icao": "DNKA",
+    "name": "Kaduna International Airport",
+    "lat": 10.696,
+    "lon": 7.32011
+  },
+  {
+    "iata": "KAN",
+    "icao": "DNKN",
+    "name": "Mallam Aminu Kano International Airport",
+    "lat": 12.045613,
+    "lon": 8.523566
+  },
+  {
+    "iata": "LOS",
+    "icao": "DNMM",
+    "name": "Murtala Muhammed International Airport",
+    "lat": 6.57737,
+    "lon": 3.32116
+  },
+  {
+    "iata": "MDI",
+    "icao": "DNMK",
+    "name": "Makurdi Airport",
+    "lat": 7.70388,
+    "lon": 8.61394
+  },
+  {
+    "iata": "MIU",
+    "icao": "DNMA",
+    "name": "Maiduguri International Airport",
+    "lat": 11.854163,
+    "lon": 13.080702
+  },
+  {
+    "iata": "MXJ",
+    "icao": "DNMN",
+    "name": "Minna Airport",
+    "lat": 9.652170181274414,
+    "lon": 6.462259769439697
+  },
+  {
+    "iata": "PHC",
+    "icao": "DNPO",
+    "name": "Port Harcourt International Airport",
+    "lat": 5.01549,
+    "lon": 6.94959
+  },
+  {
+    "iata": "PHG",
+    "icao": "NG-0004",
+    "name": "Port Harcourt City Airport / Port Harcourt Air Force Base",
+    "lat": 4.846111,
+    "lon": 7.021389
+  },
+  {
+    "iata": "QOW",
+    "icao": "DNIM",
+    "name": "Sam Mbakwe International Cargo Airport",
+    "lat": 5.42706,
+    "lon": 7.20603
+  },
+  {
+    "iata": "QRW",
+    "icao": "DNSU",
+    "name": "Warri Airport",
+    "lat": 5.59821,
+    "lon": 5.8187
+  },
+  {
+    "iata": "QUO",
+    "icao": "DNAI",
+    "name": "Akwa Ibom International Airport",
+    "lat": 4.8725,
+    "lon": 8.093
+  },
+  {
+    "iata": "SKO",
+    "icao": "DNSO",
+    "name": "Sadiq Abubakar III International Airport",
+    "lat": 12.915729,
+    "lon": 5.207547
+  },
+  {
+    "iata": "YOL",
+    "icao": "DNYO",
+    "name": "Yola Airport",
+    "lat": 9.257550239562988,
+    "lon": 12.430399894714355
+  },
+  {
+    "iata": "ZAR",
+    "icao": "DNZA",
+    "name": "Zaria Airport",
+    "lat": 11.1302,
+    "lon": 7.68581
+  }
+]
