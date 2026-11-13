@@ -281,6 +281,29 @@ describe('GET /api/flights/:flt', () => {
     expect(response.json()).toEqual({ error: 'invalid_airport', field: 'origin' });
     await app.close();
   });
+
+  it('accepts a flight lookup without origin or destination', async () => {
+    const db = seedDb();
+    seedDepartures(db);
+    const app = makeApp(db);
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/flights/P47443',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      flt: 'P47443',
+      origin: null,
+      dest: null,
+      samples: DEP_DATES.map((dateWat) => ({
+        dateWat,
+        timeWat: '14:40',
+        weekday: true,
+      })),
+    });
+    await app.close();
+  });
 });
 
 describe('static hosting', () => {

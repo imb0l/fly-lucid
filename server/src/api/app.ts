@@ -75,8 +75,8 @@ export interface SearchResponse {
 
 export interface FlightSamplesResponse {
   flt: string;
-  origin: string;
-  dest: string;
+  origin: string | null;
+  dest: string | null;
   samples: { dateWat: string; timeWat: string; weekday: boolean }[];
 }
 
@@ -275,14 +275,21 @@ export function buildApp(db: Db, options: BuildAppOptions = {}): FastifyInstance
     const query = request.query as Record<string, unknown>;
     const nowSec = now();
 
-    const origin = parseIata(query.origin);
-    if (origin === null || queries.airportName(origin) === null) {
+    const originParam = query.origin;
+    const origin = originParam === undefined || originParam === '' ? null : parseIata(originParam);
+    if (originParam !== undefined && originParam !== '' && (origin === null || queries.airportName(origin) === null)) {
       const body: InvalidAirport = { error: 'invalid_airport', field: 'origin' };
       return reply.code(400).send(body);
     }
 
-    const dest = parseIata(query.dest);
-    if (dest === null || queries.airportName(dest) === null) {
+    const destParam = query.dest;
+    const dest = destParam === undefined || destParam === '' ? null : parseIata(destParam);
+    if (destParam !== undefined && destParam !== '' && (dest === null || queries.airportName(dest) === null)) {
+      const body: InvalidAirport = { error: 'invalid_airport', field: 'dest' };
+      return reply.code(400).send(body);
+    }
+
+    if (origin !== null && origin === dest) {
       const body: InvalidAirport = { error: 'invalid_airport', field: 'dest' };
       return reply.code(400).send(body);
     }

@@ -77,7 +77,7 @@ export interface ApiQueries {
   /** Timestamp of the most recent successful poll, or `null` when never polled. */
   latestPollOkTs(): number | null;
   /** Departure timestamps for a flight on a route, newest first. */
-  departureSamples(flt: string, origin: string, dest: string, sinceTs: number): number[];
+  departureSamples(flt: string, origin: string | null, dest: string | null, sinceTs: number): number[];
 }
 
 /**
@@ -107,9 +107,10 @@ export function createQueries(db: Db): ApiQueries {
   const airportByName = db.prepare<[string], { name: string }>(
     'SELECT name FROM airports WHERE iata = ?',
   );
-  const depRows = db.prepare<[string, string, string, number], TimestampRow>(
+  const depRows = db.prepare<[string | null, string | null, string | null, string | null, string, number], TimestampRow>(
     `SELECT ts FROM events
-      WHERE kind = 'DEP' AND airport = ? AND dest = ? AND flt = ? AND ts >= ?
+      WHERE kind = 'DEP' AND (? IS NULL OR airport = ?) AND (? IS NULL OR dest = ?)
+        AND flt = ? AND ts >= ?
       ORDER BY ts DESC`,
   );
 
@@ -163,11 +164,11 @@ export function createQueries(db: Db): ApiQueries {
 
     departureSamples(
       flt: string,
-      origin: string,
-      dest: string,
+      origin: string | null,
+      dest: string | null,
       sinceTs: number,
     ): number[] {
-      return depRows.all(origin, dest, flt, sinceTs).map((row) => row.ts);
+      return depRows.all(origin, origin, dest, dest, flt, sinceTs).map((row) => row.ts);
     },
   };
 }
