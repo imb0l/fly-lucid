@@ -107,9 +107,15 @@ export function createQueries(db: Db): ApiQueries {
   const airportByName = db.prepare<[string], { name: string }>(
     'SELECT name FROM airports WHERE iata = ?',
   );
-  const depRows = db.prepare<[string | null, string | null, string | null, string | null, string, number], TimestampRow>(
+  const depRowsByOrigin = db.prepare<[string, string | null, string | null, string, number], TimestampRow>(
     `SELECT ts FROM events
-      WHERE kind = 'DEP' AND (? IS NULL OR airport = ?) AND (? IS NULL OR dest = ?)
+      WHERE kind = 'DEP' AND airport = ? AND (? IS NULL OR dest = ?)
+        AND flt = ? AND ts >= ?
+      ORDER BY ts DESC`,
+  );
+  const depRowsAnyOrigin = db.prepare<[string | null, string | null, string, number], TimestampRow>(
+    `SELECT ts FROM events
+      WHERE kind = 'DEP' AND (? IS NULL OR dest = ?)
         AND flt = ? AND ts >= ?
       ORDER BY ts DESC`,
   );
@@ -168,7 +174,11 @@ export function createQueries(db: Db): ApiQueries {
       dest: string | null,
       sinceTs: number,
     ): number[] {
-      return depRows.all(origin, origin, dest, dest, flt, sinceTs).map((row) => row.ts);
+      const rows =
+        origin !== null
+          ? depRowsByOrigin.all(origin, dest, dest, flt, sinceTs)
+          : depRowsAnyOrigin.all(dest, dest, flt, sinceTs);
+      return rows.map((row) => row.ts);
     },
   };
 }
