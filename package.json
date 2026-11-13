@@ -1,0 +1,10 @@
+{
+  "name": "fly-lucid",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -C server test"
+  }
+}
