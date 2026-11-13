@@ -1,4 +1,5 @@
 import { openDb } from './db/db.js';
+import { seedAirports } from './db/seed-airports.js';
 import { FEED_URL } from './feed/fr24.js';
 import { DEFAULT_POLL_MS, runPoller } from './ingest/poller.js';
 
@@ -22,6 +23,7 @@ process.on('SIGINT', stop);
 process.on('SIGTERM', stop);
 
 const db = openDb(dbPath);
+seedAirports(db);
 
 try {
   await runPoller({ db, feedUrl, pollMs, signal: controller.signal });

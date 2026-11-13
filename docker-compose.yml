@@ -1,0 +1,23 @@
+services:
+  poller:
+    build: .
+    command: ["node", "server/dist/poller-main.js"]
+    environment:
+      DB_PATH: /app/data/fly.db
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  api:
+    build: .
+    command: ["node", "server/dist/api-main.js"]
+    environment:
+      DB_PATH: /app/data/fly.db
+      PORT: "8787"
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - poller
+    restart: unless-stopped
