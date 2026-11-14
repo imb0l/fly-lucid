@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { openDb, type Db } from '../src/db/db.js';
 import {
+  estimateTightForecast,
   forecast,
   floorToReady,
   minuteOfDayWat,
@@ -177,42 +178,34 @@ describe('forecast on a seeded database', () => {
     expect(candidate.n).toBe(groupCount);
     expect(candidate.n).toBe(24);
     expect(candidate.n).toBeGreaterThanOrEqual(5);
-    // Weekday group: every 14:40 inside [13:30, 15:00], every 19:10 outside.
-    expect(candidate.score).toBeCloseTo(20 / 24, 10);
-    expect(candidate.p50).toBe(14 * 60 + 40);
-    expect(candidate.p10).toBe(14 * 60 + 40);
-    // The four 19:10 weekday samples push p90 (index 21 of 24) to 19:10.
-    expect(candidate.p90).toBe(19 * 60 + 10);
-    expect(candidate.score).toBeGreaterThanOrEqual(0);
+    // Recency-weighted + MAD-Winsorized tight forecast keeps p50 near 14:40
+    // and trims the four 19:10 outliers so the [p10, p90] window stays tight
+    // (< 60 minutes wide instead of the 270-minute 14:40..19:10 span).
+    expect(candidate.p50).toBeGreaterThanOrEqual(14 * 60 + 40);
+    expect(candidate.p50).toBeLessThanOrEqual(15 * 60 + 5);
+    expect(candidate.p90 - candidate.p10).toBeLessThanOrEqual(56);
+    expect(candidate.score).toBeGreaterThan(0.5);
     expect(candidate.score).toBeLessThanOrEqual(1);
     // Same-day search with a stale feed never adjusts and reports unknown.
     expect(candidate.tail).toEqual({ reg: '5N-T0', status: 'unknown', adjusted: false });
+  });
 
-    // Cross-check against the seeded rows, applying the window rule directly.
-    const rows = db
-      .prepare(
-        `SELECT ts FROM events WHERE kind = 'DEP' AND airport = 'LOS' AND dest = 'ABV' AND flt = ?`,
-      )
-      .all(FLIGHT) as Array<{ ts: number }>;
-    let hits = 0;
-    let groupSize = 0;
-    for (const row of rows) {
-      const minute = minuteOfDayWat(row.ts);
-      const dateWs = new Date((row.ts + 3600) * 1000);
-      const dateWat = [
-        dateWs.getUTCFullYear().toString().padStart(4, '0'),
-        (dateWs.getUTCMonth() + 1).toString().padStart(2, '0'),
-        dateWs.getUTCDate().toString().padStart(2, '0'),
-      ].join('-');
-      if (weekdayGroup(dateWat) !== 'weekday') {
-        continue;
-      }
-      groupSize += 1;
-      if (minute >= 13 * 60 + 30 && minute <= 15 * 60) {
-        hits += 1;
-      }
-    }
-    expect(candidate.score).toBeCloseTo(hits / groupSize, 10);
+  it('tightens the interval and tracks recent regime shifts via estimateTightForecast', () => {
+    const base = watsMidnightUtc(TODAY);
+    // P47214 real 6-day series (older ~14:25, recent 2 days ~15:31 & 15:57, plus one 17:02 spike)
+    const timestamps = [
+      base - 1 * 86_400 + (15 * 60 + 31) * 60,
+      base - 2 * 86_400 + (15 * 60 + 57) * 60,
+      base - 3 * 86_400 + (17 * 60 + 2) * 60,
+      base - 5 * 86_400 + (15 * 60 + 6) * 60,
+      base - 6 * 86_400 + (14 * 60 + 29) * 60,
+      base - 7 * 86_400 + (14 * 60 + 21) * 60,
+    ];
+    const stats = estimateTightForecast(timestamps, null, 14 * 60);
+    // Tracks recent ~15:37 takeoff (actual was 15:38) and trims the 161m raw span to <= 56m.
+    expect(stats.p50).toBeGreaterThanOrEqual(15 * 60 + 25);
+    expect(stats.p50).toBeLessThanOrEqual(15 * 60 + 45);
+    expect(stats.p90 - stats.p10).toBeLessThanOrEqual(56);
   });
 
   it('uses the events_lookup index for the departure sample query', () => {

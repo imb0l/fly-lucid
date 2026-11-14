@@ -21,13 +21,20 @@ export const MAX_DAYS_AHEAD = 60;
 const MAX_CANDIDATES = 10;
 /** Aircraft states must be at least this fresh to drive tail adjustment. */
 const STATE_FRESH_SEC = 120;
+/** Exponential recency half-life (in days) for weighting observed departures. */
+export const RECENCY_HALF_LIFE_DAYS = 1.8;
+/** Minimum and maximum half-widths (minutes) for the tightened [p10, p90] window. */
+const MIN_HALF_WINDOW_MIN = 12;
+const MAX_HALF_LOW_MIN = 26;
+const MAX_HALF_HIGH_MIN = 30;
+/** Typical domestic cruise ground speed (knots) when estimating outstation transit. */
+const CRUISE_SPEED_KT = 340;
 /** Seconds in a day. */
 const DAY_SEC = 86_400;
 /** Africa/Lagos (WAT) is a fixed UTC+1 offset. */
 const WAT_OFFSET_SEC = 3600;
 /** Earth radius in nautical miles. */
 const EARTH_RADIUS_NM = 3440.065;
-
 export type TailStatus = 'inbound' | 'inbound_other_day' | 'not_inbound' | 'unknown';
 
 export interface TailInfo {
@@ -334,9 +341,134 @@ function latestDeparture(
     .get({ origin, dest, flt, since: sinceTs });
 }
 
+export interface WeightedDepSample {
+  ts: number;
+  min: number;
+  clampedMin: number;
+  w: number;
+}
+
+function weightedQuantile(
+  items: readonly WeightedDepSample[],
+  key: 'min' | 'clampedMin',
+  q: number,
+): number {
+  if (items.length === 0) {
+    throw new RangeError('weightedQuantile requires a non-empty array');
+  }
+  const sorted = [...items].sort((left, right) => left[key] - right[key]);
+  const totalW = sorted.reduce((sum, item) => sum + item.w, 0);
+  if (totalW <= 0) {
+    return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))]![key];
+  }
+  const target = q * totalW;
+  let acc = 0;
+  for (let i = 0; i < sorted.length; i += 1) {
+    const cur = sorted[i]!;
+    const prev = acc;
+    acc += cur.w;
+    if (acc >= target) {
+      if (i === 0) {
+        return cur[key];
+      }
+      const prevItem = sorted[i - 1]!;
+      const frac = cur.w > 0 ? (target - prev) / cur.w : 0;
+      return Math.round(prevItem[key] + frac * (cur[key] - prevItem[key]));
+    }
+  }
+  return sorted[sorted.length - 1]![key];
+}
+
 /**
- * Same-day inbound tail adjustment. Returns the tail block plus samples that
- * may have been floored to the earliest physically possible departure.
+ * Build recency-weighted, MAD-Winsorized departure samples and compute a
+ * momentum-adjusted p50 plus a tight [p10, p90] likely takeoff interval.
+ */
+export function estimateTightForecast(
+  timestamps: readonly number[],
+  readyFloorMin: number | null,
+  atMin: number,
+): { p10: number; p50: number; p90: number; score: number } {
+  const byNewest = [...timestamps].sort((left, right) => right - left);
+  const newestTs = byNewest[0] ?? 0;
+
+  const rawItems: WeightedDepSample[] = byNewest.map((ts) => {
+    const rawMin = minuteOfDayWat(ts);
+    const min = readyFloorMin === null ? rawMin : Math.max(rawMin, readyFloorMin);
+    const ageDays = Math.max(0, (newestTs - ts) / DAY_SEC);
+    const w = Math.pow(0.5, ageDays / RECENCY_HALF_LIFE_DAYS);
+    return { ts, min, clampedMin: min, w };
+  });
+
+  const recMed = weightedQuantile(rawItems, 'min', 0.5);
+  const devItems: WeightedDepSample[] = rawItems.map((item) => ({
+    ...item,
+    min: Math.abs(item.min - recMed),
+  }));
+  const recMad = Math.max(10, weightedQuantile(devItems, 'min', 0.5));
+  const trimBand = Math.max(22, Math.min(50, Math.round(2.0 * recMad)));
+
+  const trimmed: WeightedDepSample[] = rawItems.map((item) => ({
+    ...item,
+    clampedMin: Math.max(recMed - trimBand, Math.min(recMed + trimBand, item.min)),
+  }));
+
+  const coreMed = weightedQuantile(trimmed, 'clampedMin', 0.5);
+
+  let recentMean = coreMed;
+  let olderMean = coreMed;
+  if (trimmed.length >= 4) {
+    const first = trimmed[0]!;
+    const second = trimmed[1]!;
+    const recentW = first.w + second.w;
+    recentMean =
+      recentW > 0
+        ? (first.clampedMin * first.w + second.clampedMin * second.w) / recentW
+        : coreMed;
+    const older = trimmed.slice(2);
+    const olderW = older.reduce((sum, item) => sum + item.w, 0);
+    olderMean =
+      olderW > 0
+        ? older.reduce((sum, item) => sum + item.clampedMin * item.w, 0) / olderW
+        : coreMed;
+  }
+
+  const momentum = Math.max(-28, Math.min(32, Math.round(0.35 * (recentMean - olderMean))));
+  const baseP50 = Math.round(0.65 * recentMean + 0.35 * coreMed + 0.25 * momentum);
+  const flooredP50 = readyFloorMin === null ? baseP50 : Math.max(baseP50, readyFloorMin);
+  const p50 = Math.max(0, Math.min(1439, flooredP50));
+
+  const q20 = weightedQuantile(trimmed, 'clampedMin', 0.2);
+  const q80 = weightedQuantile(trimmed, 'clampedMin', 0.8);
+  const coreSpread = Math.max(0, q80 - q20);
+  const halfLow =
+    coreSpread === 0
+      ? 0
+      : Math.max(MIN_HALF_WINDOW_MIN, Math.min(MAX_HALF_LOW_MIN, Math.round(coreSpread * 0.45)));
+  const halfHigh =
+    coreSpread === 0
+      ? 0
+      : Math.max(MIN_HALF_WINDOW_MIN, Math.min(MAX_HALF_HIGH_MIN, Math.round(coreSpread * 0.55)));
+
+  const rawP10 = Math.max(0, p50 - halfLow);
+  const p10 = readyFloorMin === null ? rawP10 : Math.max(rawP10, readyFloorMin);
+  const p90 = Math.min(1439, Math.max(p50, p50 + halfHigh));
+
+  const lower = Math.max(0, atMin - WINDOW_BEFORE_MIN);
+  const upper = Math.min(1439, atMin + WINDOW_AFTER_MIN);
+  const totalW = trimmed.reduce((sum, item) => sum + item.w, 0);
+  const hitW = trimmed.reduce(
+    (sum, item) => sum + (item.clampedMin >= lower && item.clampedMin <= upper ? item.w : 0),
+    0,
+  );
+  const score = totalW > 0 ? hitW / totalW : 0;
+
+  return { p10, p50, p90, score };
+}
+
+/**
+ * Same-day inbound tail adjustment. Returns the tail block plus an optional
+ * earliest readiness minute-of-day when the assigned aircraft is inbound or
+ * still at an outstation airport.
  */
 function adjustForInboundTail(
   db: Db,
@@ -345,13 +477,13 @@ function adjustForInboundTail(
   latestAirline: string | null,
   sinceTs: number,
   samples: number[],
-): { tail: TailInfo; samples: number[] } {
+): { tail: TailInfo; samples: number[]; readyFloorMin: number | null } {
   const reg = dep?.reg ?? null;
   const unchanged: TailInfo = { reg, status: 'unknown', adjusted: false };
 
   // The live tail only informs same-day searches with a fresh feed.
   if (input.dateWat !== todayWat(input.nowSec) || input.feedStale || reg === null) {
-    return { tail: unchanged, samples };
+    return { tail: unchanged, samples, readyFloorMin: null };
   }
 
   const state = db
@@ -360,16 +492,7 @@ function adjustForInboundTail(
     )
     .get({ reg });
   if (state === undefined || state.updated_at < input.nowSec - STATE_FRESH_SEC) {
-    return { tail: unchanged, samples };
-  }
-
-  if (
-    state.on_ground !== 0 ||
-    state.dest !== input.origin ||
-    state.gs_kt === null ||
-    state.gs_kt <= 0
-  ) {
-    return { tail: { reg, status: 'not_inbound', adjusted: false }, samples };
+    return { tail: unchanged, samples, readyFloorMin: null };
   }
 
   const airport = db
@@ -378,26 +501,52 @@ function adjustForInboundTail(
     )
     .get({ iata: input.origin });
   if (airport === undefined || airport.lat === null || airport.lon === null) {
-    return { tail: { reg, status: 'not_inbound', adjusted: false }, samples };
+    return { tail: { reg, status: 'not_inbound', adjusted: false }, samples, readyFloorMin: null };
   }
 
   const distNm = haversineNm(state.lat, state.lon, airport.lat, airport.lon);
-  const speedKt = Math.max(state.gs_kt, MIN_GROUND_SPEED_KT);
-  const etaSec = input.nowSec + (distNm / speedKt) * 3600;
   const turnaroundMin =
     latestAirline === null
       ? DEFAULT_TURNAROUND_MIN
       : turnaroundMedianMin(db, input.origin, latestAirline, sinceTs);
-  const readyTs = Math.floor(etaSec + turnaroundMin * 60);
 
-  if (watDateStr(readyTs) !== input.dateWat) {
-    return { tail: { reg, status: 'inbound_other_day', adjusted: false }, samples };
+  // Case 1: Airborne and headed to origin.
+  if (
+    state.on_ground === 0 &&
+    state.dest === input.origin &&
+    state.gs_kt !== null &&
+    state.gs_kt > 0
+  ) {
+    const speedKt = Math.max(state.gs_kt, MIN_GROUND_SPEED_KT);
+    const etaSec = input.nowSec + (distNm / speedKt) * 3600;
+    const readyTs = Math.floor(etaSec + turnaroundMin * 60);
+    if (watDateStr(readyTs) !== input.dateWat) {
+      return { tail: { reg, status: 'inbound_other_day', adjusted: false }, samples, readyFloorMin: null };
+    }
+    const readyMin = minuteOfDayWat(readyTs);
+    return {
+      tail: { reg, status: 'inbound', adjusted: true },
+      samples: floorToReady(samples, readyMin),
+      readyFloorMin: readyMin,
+    };
   }
 
-  return {
-    tail: { reg, status: 'inbound', adjusted: true },
-    samples: floorToReady(samples, minuteOfDayWat(readyTs)),
-  };
+  // Case 2: On the ground at an outstation airport (> 25 nm from origin):
+  // must still fly to origin and complete a turnaround before departing.
+  if (state.on_ground === 1 && distNm > 25) {
+    const transitSec = (distNm / CRUISE_SPEED_KT) * 3600;
+    const readyTs = Math.floor(input.nowSec + transitSec + turnaroundMin * 60);
+    if (watDateStr(readyTs) === input.dateWat) {
+      const readyMin = minuteOfDayWat(readyTs);
+      return {
+        tail: { reg, status: 'not_inbound', adjusted: true },
+        samples: floorToReady(samples, readyMin),
+        readyFloorMin: readyMin,
+      };
+    }
+  }
+
+  return { tail: { reg, status: 'not_inbound', adjusted: false }, samples, readyFloorMin: null };
 }
 
 /**
@@ -417,33 +566,32 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
   const insufficient: InsufficientFlight[] = [];
 
   for (const flightNo of flights) {
-    let samples = depSamples(
+    let sampleTimestamps = depSamples(
       db,
       input.origin,
       input.dest,
       flightNo,
       sinceTs,
       group,
-    ).map(minuteOfDayWat);
+    );
 
-    if (samples.length < MIN_SAMPLES) {
-      samples = depSamples(
+    if (sampleTimestamps.length < MIN_SAMPLES) {
+      sampleTimestamps = depSamples(
         db,
         input.origin,
         input.dest,
         flightNo,
         sinceTs,
         null,
-      ).map(minuteOfDayWat);
+      );
     }
 
-    if (samples.length < MIN_SAMPLES) {
-      insufficient.push({ flightNo, n: samples.length });
+    if (sampleTimestamps.length < MIN_SAMPLES) {
+      insufficient.push({ flightNo, n: sampleTimestamps.length });
       continue;
     }
 
-    samples.sort((left, right) => left - right);
-
+    const rawMinutes = sampleTimestamps.map(minuteOfDayWat).sort((left, right) => left - right);
     const dep = latestDeparture(db, input.origin, input.dest, flightNo, sinceTs);
     const latestAirline = dep?.airline ?? null;
     const adjusted = adjustForInboundTail(
@@ -452,18 +600,22 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
       dep,
       latestAirline,
       sinceTs,
-      samples,
+      rawMinutes,
     );
-    const finalSamples = adjusted.samples.sort((left, right) => left - right);
+    const stats = estimateTightForecast(
+      sampleTimestamps,
+      adjusted.readyFloorMin,
+      input.atMin,
+    );
 
     candidates.push({
       flightNo,
       airline: latestAirline,
-      score: scoreWindow(finalSamples, input.atMin),
-      n: finalSamples.length,
-      p10: percentileNearestRank(finalSamples, 0.1),
-      p50: percentileNearestRank(finalSamples, 0.5),
-      p90: percentileNearestRank(finalSamples, 0.9),
+      score: stats.score,
+      n: sampleTimestamps.length,
+      p10: stats.p10,
+      p50: stats.p50,
+      p90: stats.p90,
       tail: adjusted.tail,
     });
   }
