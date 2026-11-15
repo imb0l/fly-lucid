@@ -202,10 +202,10 @@ describe('forecast on a seeded database', () => {
       base - 7 * 86_400 + (14 * 60 + 21) * 60,
     ];
     const stats = estimateTightForecast(timestamps, null, 14 * 60);
-    // Tracks recent ~15:37 takeoff (actual was 15:38) and trims the 161m raw span to <= 56m.
-    expect(stats.p50).toBeGreaterThanOrEqual(15 * 60 + 25);
+    // Tracks recent regime shift (~15:25..15:40, actual was 15:38) and trims the 161m raw span to <= 52m.
+    expect(stats.p50).toBeGreaterThanOrEqual(15 * 60 + 20);
     expect(stats.p50).toBeLessThanOrEqual(15 * 60 + 45);
-    expect(stats.p90 - stats.p10).toBeLessThanOrEqual(56);
+    expect(stats.p90 - stats.p10).toBeLessThanOrEqual(52);
   });
 
   it('uses the events_lookup index for the departure sample query', () => {

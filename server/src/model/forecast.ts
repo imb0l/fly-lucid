@@ -22,11 +22,11 @@ const MAX_CANDIDATES = 10;
 /** Aircraft states must be at least this fresh to drive tail adjustment. */
 const STATE_FRESH_SEC = 120;
 /** Exponential recency half-life (in days) for weighting observed departures. */
-export const RECENCY_HALF_LIFE_DAYS = 1.8;
+export const RECENCY_HALF_LIFE_DAYS = 6.0;
 /** Minimum and maximum half-widths (minutes) for the tightened [p10, p90] window. */
 const MIN_HALF_WINDOW_MIN = 12;
-const MAX_HALF_LOW_MIN = 26;
-const MAX_HALF_HIGH_MIN = 30;
+const MAX_HALF_LOW_MIN = 24;
+const MAX_HALF_HIGH_MIN = 28;
 /** Typical domestic cruise ground speed (knots) when estimating outstation transit. */
 const CRUISE_SPEED_KT = 340;
 /** Seconds in a day. */
@@ -399,41 +399,38 @@ export function estimateTightForecast(
     return { ts, min, clampedMin: min, w };
   });
 
-  const recMed = weightedQuantile(rawItems, 'min', 0.5);
-  const devItems: WeightedDepSample[] = rawItems.map((item) => ({
-    ...item,
-    min: Math.abs(item.min - recMed),
-  }));
-  const recMad = Math.max(10, weightedQuantile(devItems, 'min', 0.5));
-  const trimBand = Math.max(22, Math.min(50, Math.round(2.0 * recMad)));
+  const sortedRawMins = rawItems.map((item) => item.min).sort((left, right) => left - right);
+  const sampleMed = sortedRawMins[Math.floor((sortedRawMins.length - 1) * 0.5)]!;
+  const absDevs = sortedRawMins
+    .map((min) => Math.abs(min - sampleMed))
+    .sort((left, right) => left - right);
+  const mad = Math.max(8, absDevs[Math.floor((absDevs.length - 1) * 0.5)]!);
+  const trimBand = Math.max(18, Math.min(50, Math.round(1.5 * mad)));
 
   const trimmed: WeightedDepSample[] = rawItems.map((item) => ({
     ...item,
-    clampedMin: Math.max(recMed - trimBand, Math.min(recMed + trimBand, item.min)),
+    clampedMin: Math.max(sampleMed - trimBand, Math.min(sampleMed + trimBand, item.min)),
   }));
 
-  const coreMed = weightedQuantile(trimmed, 'clampedMin', 0.5);
+  const totalW = trimmed.reduce((sum, item) => sum + item.w, 0);
+  const wMean =
+    totalW > 0
+      ? trimmed.reduce((sum, item) => sum + item.clampedMin * item.w, 0) / totalW
+      : sampleMed;
+  const wMed = weightedQuantile(trimmed, 'clampedMin', 0.48);
+  let baseP50 = Math.round(0.5 * wMed + 0.5 * wMean);
 
-  let recentMean = coreMed;
-  let olderMean = coreMed;
-  if (trimmed.length >= 4) {
-    const first = trimmed[0]!;
-    const second = trimmed[1]!;
-    const recentW = first.w + second.w;
-    recentMean =
-      recentW > 0
-        ? (first.clampedMin * first.w + second.clampedMin * second.w) / recentW
-        : coreMed;
-    const older = trimmed.slice(2);
-    const olderW = older.reduce((sum, item) => sum + item.w, 0);
-    olderMean =
-      olderW > 0
-        ? older.reduce((sum, item) => sum + item.clampedMin * item.w, 0) / olderW
-        : coreMed;
+  // Two-day consecutive same-sign regime gate: shift p50 only when both of the
+  // two most recent observations deviate in the same direction from baseP50.
+  if (trimmed.length >= 3) {
+    const d0 = trimmed[0]!.clampedMin - baseP50;
+    const d1 = trimmed[1]!.clampedMin - baseP50;
+    if (d0 * d1 > 0 && Math.min(Math.abs(d0), Math.abs(d1)) >= 8) {
+      const consistentShift = Math.sign(d0) * Math.min(Math.abs(d0), Math.abs(d1));
+      baseP50 += Math.round(0.45 * consistentShift);
+    }
   }
 
-  const momentum = Math.max(-28, Math.min(32, Math.round(0.35 * (recentMean - olderMean))));
-  const baseP50 = Math.round(0.65 * recentMean + 0.35 * coreMed + 0.25 * momentum);
   const flooredP50 = readyFloorMin === null ? baseP50 : Math.max(baseP50, readyFloorMin);
   const p50 = Math.max(0, Math.min(1439, flooredP50));
 
@@ -443,19 +440,17 @@ export function estimateTightForecast(
   const halfLow =
     coreSpread === 0
       ? 0
-      : Math.max(MIN_HALF_WINDOW_MIN, Math.min(MAX_HALF_LOW_MIN, Math.round(coreSpread * 0.45)));
+      : Math.max(MIN_HALF_WINDOW_MIN, Math.min(MAX_HALF_LOW_MIN, Math.round(1.1 * mad)));
   const halfHigh =
     coreSpread === 0
       ? 0
-      : Math.max(MIN_HALF_WINDOW_MIN, Math.min(MAX_HALF_HIGH_MIN, Math.round(coreSpread * 0.55)));
+      : Math.max(MIN_HALF_WINDOW_MIN, Math.min(MAX_HALF_HIGH_MIN, Math.round(1.35 * mad)));
 
   const rawP10 = Math.max(0, p50 - halfLow);
   const p10 = readyFloorMin === null ? rawP10 : Math.max(rawP10, readyFloorMin);
   const p90 = Math.min(1439, Math.max(p50, p50 + halfHigh));
-
   const lower = Math.max(0, atMin - WINDOW_BEFORE_MIN);
   const upper = Math.min(1439, atMin + WINDOW_AFTER_MIN);
-  const totalW = trimmed.reduce((sum, item) => sum + item.w, 0);
   const hitW = trimmed.reduce(
     (sum, item) => sum + (item.clampedMin >= lower && item.clampedMin <= upper ? item.w : 0),
     0,
