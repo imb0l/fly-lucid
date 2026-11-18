@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS events (
   airport TEXT NOT NULL,
   dest TEXT,
   ts INTEGER NOT NULL,
+  sched_ts INTEGER,
   UNIQUE(hex, kind, ts)
 );
 

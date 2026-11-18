@@ -18,6 +18,14 @@ function resolveSchemaPath(): string {
   throw new Error(`schema.sql not found at ${localPath} or ${srcPath}`);
 }
 
+/** Add a column to an existing table; older databases predate it. */
+function addColumnIfMissing(db: Db, table: string, column: string, type: string): void {
+  const cols = db.prepare<[], { name: string }>(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
+}
+
 export function openDb(dbPath: string): Db {
   if (dbPath !== ':memory:') {
     const dir = path.dirname(dbPath);
@@ -32,6 +40,7 @@ export function openDb(dbPath: string): Db {
 
   const schemaSql = fs.readFileSync(resolveSchemaPath(), 'utf8');
   db.exec(schemaSql);
+  addColumnIfMissing(db, 'events', 'sched_ts', 'INTEGER');
 
   return db;
 }
