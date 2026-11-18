@@ -16,7 +16,7 @@ export const AIRLINES: Record<string, AirlineInfo> = {
   GWG: { name: 'Green Africa Airways', bookingUrl: 'https://greenafrica.com/' },
   NUA: { name: 'United Nigeria Airlines', bookingUrl: 'https://flyunitednigeria.com/' },
   NGL: { name: 'Max Air', bookingUrl: 'https://maxair.com.ng/' },
-  NVD: { name: 'Air Peace (op. by Avion Express)', bookingUrl: 'https://flyairpeace.com/' },
+  NVD: { name: 'Avion Express', bookingUrl: null },
   KLJ: { name: 'Air Peace (op. by KlasJet)', bookingUrl: 'https://flyairpeace.com/' },
   FBM: { name: 'Flying Bulls', bookingUrl: null },
   THY: { name: 'Turkish Airlines', bookingUrl: 'https://www.turkishairlines.com/' },
