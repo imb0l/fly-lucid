@@ -23,10 +23,13 @@ const MAX_CANDIDATES = 10;
 const STATE_FRESH_SEC = 120;
 /** Exponential recency half-life (in days) for weighting observed departures. */
 export const RECENCY_HALF_LIFE_DAYS = 6.0;
-/** Minimum and maximum half-widths (minutes) for the tightened [p10, p90] window. */
+/** Half-width floor and caps (minutes) for the [p10, p90] likely-takeoff window. */
 const MIN_HALF_WINDOW_MIN = 12;
-const MAX_HALF_LOW_MIN = 24;
-const MAX_HALF_HIGH_MIN = 28;
+const MAX_HALF_LOW_MIN = 52;
+const MAX_HALF_HIGH_MIN = 62;
+/** MAD multipliers calibrated to ~80% interval coverage on observed departures. */
+const HALF_LOW_MAD_MULT = 2.4;
+const HALF_HIGH_MAD_MULT = 3.0;
 /** Typical domestic cruise ground speed (knots) when estimating outstation transit. */
 const CRUISE_SPEED_KT = 340;
 /** Seconds in a day. */
@@ -440,11 +443,17 @@ export function estimateTightForecast(
   const halfLow =
     coreSpread === 0
       ? 0
-      : Math.max(MIN_HALF_WINDOW_MIN, Math.min(MAX_HALF_LOW_MIN, Math.round(1.1 * mad)));
+      : Math.max(
+          MIN_HALF_WINDOW_MIN,
+          Math.min(MAX_HALF_LOW_MIN, Math.round(HALF_LOW_MAD_MULT * mad)),
+        );
   const halfHigh =
     coreSpread === 0
       ? 0
-      : Math.max(MIN_HALF_WINDOW_MIN, Math.min(MAX_HALF_HIGH_MIN, Math.round(1.35 * mad)));
+      : Math.max(
+          MIN_HALF_WINDOW_MIN,
+          Math.min(MAX_HALF_HIGH_MIN, Math.round(HALF_HIGH_MAD_MULT * mad)),
+        );
 
   const rawP10 = Math.max(0, p50 - halfLow);
   const p10 = readyFloorMin === null ? rawP10 : Math.max(rawP10, readyFloorMin);

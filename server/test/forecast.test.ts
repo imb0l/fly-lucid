@@ -202,10 +202,24 @@ describe('forecast on a seeded database', () => {
       base - 7 * 86_400 + (14 * 60 + 21) * 60,
     ];
     const stats = estimateTightForecast(timestamps, null, 14 * 60);
-    // Tracks recent regime shift (~15:25..15:40, actual was 15:38) and trims the 161m raw span to <= 52m.
+    // Tracks the recent regime shift (~15:25..15:40) and clamps the 161m raw
+    // span to the calibrated 114m ceiling (52m below, 62m above).
     expect(stats.p50).toBeGreaterThanOrEqual(15 * 60 + 20);
     expect(stats.p50).toBeLessThanOrEqual(15 * 60 + 45);
-    expect(stats.p90 - stats.p10).toBeLessThanOrEqual(52);
+    expect(stats.p90 - stats.p10).toBeLessThanOrEqual(114);
+    expect(stats.p50 - stats.p10).toBeLessThanOrEqual(52);
+    expect(stats.p90 - stats.p50).toBeLessThanOrEqual(62);
+  });
+
+  it('keeps the window narrow when a flight departs at a stable time', () => {
+    const base = watsMidnightUtc(TODAY);
+    const timestamps = [1, 2, 3, 4, 5, 6].map(
+      (daysBack) => base - daysBack * 86_400 + (15 * 60 + 30) * 60,
+    );
+    const stats = estimateTightForecast(timestamps, null, 14 * 60);
+    expect(stats.p50).toBe(15 * 60 + 30);
+    // Zero spread keeps the minimum half-window instead of the 114m ceiling.
+    expect(stats.p90 - stats.p10).toBeLessThanOrEqual(24);
   });
 
   it('uses the events_lookup index for the departure sample query', () => {
