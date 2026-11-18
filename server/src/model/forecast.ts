@@ -32,13 +32,17 @@ const HALF_LOW_MAD_MULT = 2.4;
 const HALF_HIGH_MAD_MULT = 3.0;
 /** Typical domestic cruise ground speed (knots) when estimating outstation transit. */
 const CRUISE_SPEED_KT = 340;
+/** Share of an inbound arrival's lateness carried into the departure samples (fit on 8-17 Nov). */
+const HISTORY_TAIL_SLOPE = 0.5;
+/** Oldest arrival still treated as the aircraft's inbound leg. */
+const HISTORY_TAIL_MAX_SEC = 12 * 3600;
 /** Seconds in a day. */
 const DAY_SEC = 86_400;
 /** Africa/Lagos (WAT) is a fixed UTC+1 offset. */
 const WAT_OFFSET_SEC = 3600;
 /** Earth radius in nautical miles. */
 const EARTH_RADIUS_NM = 3440.065;
-export type TailStatus = 'inbound' | 'inbound_other_day' | 'not_inbound' | 'unknown';
+export type TailStatus = 'inbound' | 'inbound_other_day' | 'landed_inbound' | 'not_inbound' | 'unknown';
 
 export interface TailInfo {
   reg: string | null;
@@ -553,6 +557,101 @@ function adjustForInboundTail(
   return { tail: { reg, status: 'not_inbound', adjusted: false }, samples, readyFloorMin: null };
 }
 
+/** Arrival at the origin used to link a departure to its inbound leg. */
+interface InboundArrRow {
+  flt: string | null;
+  ts: number;
+}
+
+/** Wrap a minute difference into -720..720 so after-midnight times compare correctly. */
+function wrapMinutes(delta: number): number {
+  let wrapped = delta;
+  while (wrapped > 720) {
+    wrapped -= 1440;
+  }
+  while (wrapped < -720) {
+    wrapped += 1440;
+  }
+  return wrapped;
+}
+
+/** UTC epoch seconds of WAT midnight at the start of `dateWat`. */
+function watDayStartSec(dateWat: string): number {
+  const [year, month, day] = dateWat.split('-').map(Number) as [number, number, number];
+  return Date.UTC(year, month - 1, day) / 1000 - WAT_OFFSET_SEC;
+}
+
+/**
+ * History tail link for today's departures when the live aircraft state does
+ * not apply. Finds the aircraft's latest arrival at the origin within 12 h that
+ * it has not departed from, then shifts every sample by HISTORY_TAIL_SLOPE times
+ * that inbound flight's arrival lateness against its own median arrival minute.
+ * Returns null when the link does not apply.
+ */
+function landedInboundShift(
+  db: Db,
+  input: ForecastInput,
+  reg: string | null,
+  sinceTs: number,
+  samples: number[],
+): { timestamps: number[]; tail: TailInfo } | null {
+  if (reg === null || input.feedStale || input.dateWat !== todayWat(input.nowSec)) {
+    return null;
+  }
+  const inbound = db
+    .prepare<
+      { origin: string; reg: string; since: number; ref: number },
+      InboundArrRow
+    >(
+      "SELECT flt, ts FROM events WHERE kind='ARR' AND airport = :origin AND reg = :reg AND ts >= :since AND ts < :ref ORDER BY ts DESC LIMIT 1",
+    )
+    .get({
+      origin: input.origin,
+      reg,
+      since: input.nowSec - HISTORY_TAIL_MAX_SEC,
+      ref: input.nowSec,
+    });
+  if (inbound === undefined || inbound.flt === null) {
+    return null;
+  }
+  const departedSince = db
+    .prepare<
+      { origin: string; reg: string; after: number; ref: number },
+      { ts: number }
+    >(
+      "SELECT ts FROM events WHERE kind='DEP' AND airport = :origin AND reg = :reg AND ts > :after AND ts < :ref LIMIT 1",
+    )
+    .get({ origin: input.origin, reg, after: inbound.ts, ref: input.nowSec });
+  if (departedSince !== undefined) {
+    return null;
+  }
+  const priorArrivals = db
+    .prepare<
+      { origin: string; flt: string; since: number; before: number },
+      { ts: number }
+    >(
+      "SELECT ts FROM events WHERE kind='ARR' AND airport = :origin AND flt = :flt AND ts >= :since AND ts < :before",
+    )
+    .all({
+      origin: input.origin,
+      flt: inbound.flt,
+      since: sinceTs,
+      before: watDayStartSec(input.dateWat),
+    })
+    .map((row) => minuteOfDayWat(row.ts))
+    .sort((left, right) => left - right);
+  if (priorArrivals.length < MIN_SAMPLES) {
+    return null;
+  }
+  const medianMin = priorArrivals[Math.floor(priorArrivals.length / 2)]!;
+  const latenessMin = wrapMinutes(minuteOfDayWat(inbound.ts) - medianMin);
+  const shiftSec = Math.round(HISTORY_TAIL_SLOPE * latenessMin * 60);
+  return {
+    timestamps: samples.map((ts) => ts + shiftSec),
+    tail: { reg, status: 'landed_inbound', adjusted: true },
+  };
+}
+
 /**
  * Rank the flight numbers on a route by the chance their observed actual
  * takeoff falls inside the window around `atMin`. Returns at most ten ranked
@@ -606,8 +705,11 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
       sinceTs,
       rawMinutes,
     );
+    const landed = adjusted.tail.adjusted
+      ? null
+      : landedInboundShift(db, input, dep?.reg ?? null, sinceTs, sampleTimestamps);
     const stats = estimateTightForecast(
-      sampleTimestamps,
+      landed?.timestamps ?? sampleTimestamps,
       adjusted.readyFloorMin,
       input.atMin,
     );
@@ -620,7 +722,7 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
       p10: stats.p10,
       p50: stats.p50,
       p90: stats.p90,
-      tail: adjusted.tail,
+      tail: landed?.tail ?? adjusted.tail,
     });
   }
 

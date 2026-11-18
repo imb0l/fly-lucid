@@ -19,6 +19,7 @@ interface RowState {
 const TAIL_LABELS: Record<string, string> = {
   inbound: 'Inbound aircraft',
   inbound_other_day: 'Inbound, arrives another day',
+  landed_inbound: 'Inbound, already landed',
   not_inbound: 'Aircraft not inbound',
   unknown: 'Unknown',
 };
