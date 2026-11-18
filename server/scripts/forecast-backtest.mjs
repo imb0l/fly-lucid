@@ -15,6 +15,7 @@ const MATCH_BEFORE_SEC = 6 * 3600;
 const MATCH_AFTER_SEC = 12 * 3600;
 const K = 5;
 const MIN_POOL = 100;
+const CARRIER_MIN = Number(process.env.CARRIER_MIN ?? 3); // min carrier samples before carrier median replaces pool median
 const db = new Database(path.join(ROOT, 'server/data/fly.db'), { readonly: true });
 
 const harvest = [];
@@ -76,7 +77,7 @@ function predictLeg(t, pool, dayStart) {
   const gAll = pool.map(x => x.delay);
   const gMed = median(gAll), gQ10 = sortedQ(gAll, 0.1), gQ90 = sortedQ(gAll, 0.9);
   const cd = pool.filter(x => x.air === t.air).map(x => x.delay);
-  const carrierMed = cd.length >= 3 ? median(cd) : gMed;
+  const carrierMed = cd.length >= CARRIER_MIN ? median(cd) : gMed;
   const spread = cd.length >= 10
     ? { lo: carrierMed - sortedQ(cd, 0.1), hi: sortedQ(cd, 0.9) - carrierMed }
     : { lo: gMed - gQ10, hi: gQ90 - gMed };
