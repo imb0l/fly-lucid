@@ -235,3 +235,99 @@ describe('forecast on a seeded database', () => {
     expect(details).toContain('events_lookup');
   });
 });
+
+describe('history tail link on a seeded database', () => {
+  const TODAY = '2026-03-02'; // Monday, WAT
+  const NOW_SEC = Date.UTC(2026, 2, 2, 12, 0) / 1000; // 13:00 WAT
+  const FLIGHT = 'P47443';
+  const INBOUND = 'P47900';
+  const TAIL = '5N-OLD';
+  const QUERY = {
+    origin: 'LOS',
+    dest: 'ABV',
+    dateWat: TODAY,
+    atMin: 14 * 60,
+    nowSec: NOW_SEC,
+    feedStale: false,
+  };
+
+  /**
+   * Ten prior days: FLIGHT departs LOS 14:40 with TAIL, INBOUND arrives LOS
+   * 10:00 on another tail. When `todayArrivalMin` is set, the inbound
+   * aircraft lands today on TAIL at that minute-of-day WAT.
+   */
+  function linkedDb(todayArrivalMin: number | null): Db {
+    const db = openDb(':memory:');
+    const insertAirport = db.prepare(
+      'INSERT INTO airports (iata, icao, name, lat, lon) VALUES (?, ?, ?, ?, ?)',
+    );
+    insertAirport.run('LOS', 'DNMM', 'Murtala Muhammed International', 6.5774, 3.3212);
+    insertAirport.run('ABV', 'DNAA', 'Nnamdi Azikiwe International', 9.0068, 7.2632);
+
+    const insertEvent = db.prepare(`
+      INSERT INTO events (hex, reg, flt, airline, kind, airport, dest, ts)
+      VALUES (@hex, @reg, @flt, @airline, @kind, @airport, @dest, @ts)
+    `);
+    const base = watsMidnightUtc(TODAY);
+    for (let daysBack = 1; daysBack <= 10; daysBack += 1) {
+      const midnight = base - daysBack * 86_400;
+      insertEvent.run({
+        hex: `OLD${daysBack}`,
+        reg: TAIL,
+        flt: FLIGHT,
+        airline: 'APO',
+        kind: 'DEP',
+        airport: 'LOS',
+        dest: 'ABV',
+        ts: midnight + 14 * 3600 + 40 * 60,
+      });
+      insertEvent.run({
+        hex: `PREV${daysBack}`,
+        reg: '5N-PREV',
+        flt: INBOUND,
+        airline: 'APO',
+        kind: 'ARR',
+        airport: 'LOS',
+        dest: null,
+        ts: midnight + 10 * 3600,
+      });
+    }
+    if (todayArrivalMin !== null) {
+      insertEvent.run({
+        hex: 'TODAYIN',
+        reg: TAIL,
+        flt: INBOUND,
+        airline: 'APO',
+        kind: 'ARR',
+        airport: 'LOS',
+        dest: null,
+        ts: base + todayArrivalMin * 60,
+      });
+    }
+    return db;
+  }
+
+  it('shifts departure samples by half the inbound lateness when the aircraft has landed', () => {
+    const baseline = forecast(linkedDb(null), QUERY).candidates[0]!;
+    // Inbound lands 11:00 WAT against a 10:00 median: 60 min late, slope 0.5 -> +30 min.
+    const linked = forecast(linkedDb(11 * 60), QUERY).candidates[0]!;
+
+    expect(baseline.tail).toEqual({ reg: TAIL, status: 'unknown', adjusted: false });
+    expect(linked.tail).toEqual({ reg: TAIL, status: 'landed_inbound', adjusted: true });
+    expect(linked.p50 - baseline.p50).toBe(30);
+  });
+
+  it('does not link when the aircraft departed again after landing', () => {
+    const db = linkedDb(11 * 60);
+    db.prepare(`
+      INSERT INTO events (hex, reg, flt, airline, kind, airport, dest, ts)
+      VALUES ('TODAYOUT', @reg, @flt, 'APO', 'DEP', 'LOS', 'ABV', @ts)
+    `).run({
+      reg: TAIL,
+      flt: 'P47800',
+      ts: watsMidnightUtc(TODAY) + 12 * 3600 + 30 * 60,
+    });
+    const candidate = forecast(db, QUERY).candidates.find((c) => c.flightNo === FLIGHT)!;
+    expect(candidate.tail).toEqual({ reg: TAIL, status: 'unknown', adjusted: false });
+  });
+});
