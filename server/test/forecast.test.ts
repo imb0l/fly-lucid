@@ -123,7 +123,8 @@ describe('forecast on a seeded database', () => {
         dest: 'ABV',
         ts: afternoon,
       });
-      if (isWeekday) {
+      // Events after NOW_SEC are not yet observed; forecast() must exclude them.
+      if (isWeekday && afternoon < NOW_SEC) {
         groupCount += 1;
       }
 
@@ -137,7 +138,7 @@ describe('forecast on a seeded database', () => {
           dest: 'ABV',
           ts: midnight + 19 * 3600 + 10 * 60,
         });
-        if (isWeekday) {
+        if (isWeekday && midnight + 19 * 3600 + 10 * 60 < NOW_SEC) {
           groupCount += 1;
         }
       }
@@ -176,7 +177,6 @@ describe('forecast on a seeded database', () => {
     const candidate = result.candidates[0]!;
     expect(candidate.flightNo).toBe(FLIGHT);
     expect(candidate.n).toBe(groupCount);
-    expect(candidate.n).toBe(24);
     expect(candidate.n).toBeGreaterThanOrEqual(5);
     // Recency-weighted + MAD-Winsorized tight forecast keeps p50 near 14:40
     // and trims the four 19:10 outliers so the [p10, p90] window stays tight
@@ -187,7 +187,8 @@ describe('forecast on a seeded database', () => {
     expect(candidate.score).toBeGreaterThan(0.5);
     expect(candidate.score).toBeLessThanOrEqual(1);
     // Same-day search with a stale feed never adjusts and reports unknown.
-    expect(candidate.tail).toEqual({ reg: '5N-T0', status: 'unknown', adjusted: false });
+    // Today's DEPs are after NOW_SEC, so the latest observed DEP is yesterday's.
+    expect(candidate.tail).toEqual({ reg: '5N-T1', status: 'unknown', adjusted: false });
   });
 
   it('tightens the interval and tracks recent regime shifts via estimateTightForecast', () => {

@@ -193,16 +193,17 @@ export function depSamples(
   destCode: string,
   flt: string,
   sinceTs: number,
+  untilTs: number,
   group: 'weekday' | 'weekend' | null,
 ): number[] {
   const rows = db
     .prepare<
-      { origin: string; dest: string; flt: string; since: number },
+      { origin: string; dest: string; flt: string; since: number; until: number },
       DepSampleRow
     >(
-      "SELECT ts FROM events WHERE kind='DEP' AND airport = :origin AND dest = :dest AND flt = :flt AND ts >= :since",
+      "SELECT ts FROM events WHERE kind='DEP' AND airport = :origin AND dest = :dest AND flt = :flt AND ts >= :since AND ts < :until",
     )
-    .all({ origin: originCode, dest: destCode, flt, since: sinceTs });
+    .all({ origin: originCode, dest: destCode, flt, since: sinceTs, until: untilTs });
 
   const samples: number[] = [];
   for (const row of rows) {
@@ -220,12 +221,13 @@ export function routeFlights(
   origin: string,
   dest: string,
   sinceTs: number,
+  untilTs: number,
 ): string[] {
   const rows = db
-    .prepare<{ origin: string; dest: string; since: number }, { flt: string }>(
-      "SELECT DISTINCT flt FROM events WHERE kind='DEP' AND airport = :origin AND dest = :dest AND flt IS NOT NULL AND ts >= :since ORDER BY flt ASC",
+    .prepare<{ origin: string; dest: string; since: number; until: number }, { flt: string }>(
+      "SELECT DISTINCT flt FROM events WHERE kind='DEP' AND airport = :origin AND dest = :dest AND flt IS NOT NULL AND ts >= :since AND ts < :until ORDER BY flt ASC",
     )
-    .all({ origin, dest, since: sinceTs });
+    .all({ origin, dest, since: sinceTs, until: untilTs });
   return rows.map((row) => row.flt);
 }
 
@@ -247,12 +249,13 @@ export function turnaroundMedianMin(
   airport: string,
   airline: string,
   sinceTs: number,
+  untilTs: number,
 ): number {
   const rows = db
-    .prepare<{ airport: string; since: number }, TurnaroundRow>(
-      "SELECT hex, kind, airline, ts FROM events WHERE airport = :airport AND kind IN ('ARR','DEP') AND ts >= :since ORDER BY hex ASC, ts ASC, id ASC",
+    .prepare<{ airport: string; since: number; until: number }, TurnaroundRow>(
+      "SELECT hex, kind, airline, ts FROM events WHERE airport = :airport AND kind IN ('ARR','DEP') AND ts >= :since AND ts < :until ORDER BY hex ASC, ts ASC, id ASC",
     )
-    .all({ airport, since: sinceTs });
+    .all({ airport, since: sinceTs, until: untilTs });
 
   const arrivals = new Map<string, TurnaroundRow[]>();
   const departures = new Map<string, TurnaroundRow[]>();
@@ -337,15 +340,16 @@ function latestDeparture(
   dest: string,
   flt: string,
   sinceTs: number,
+  untilTs: number,
 ): LatestDepRow | undefined {
   return db
     .prepare<
-      { origin: string; dest: string; flt: string; since: number },
+      { origin: string; dest: string; flt: string; since: number; until: number },
       LatestDepRow
     >(
-      "SELECT reg, airline FROM events WHERE kind='DEP' AND airport = :origin AND dest = :dest AND flt = :flt AND ts >= :since ORDER BY ts DESC LIMIT 1",
+      "SELECT reg, airline FROM events WHERE kind='DEP' AND airport = :origin AND dest = :dest AND flt = :flt AND ts >= :since AND ts < :until ORDER BY ts DESC LIMIT 1",
     )
-    .get({ origin, dest, flt, since: sinceTs });
+    .get({ origin, dest, flt, since: sinceTs, until: untilTs });
 }
 
 export interface WeightedDepSample {
@@ -516,7 +520,7 @@ function adjustForInboundTail(
   const turnaroundMin =
     latestAirline === null
       ? DEFAULT_TURNAROUND_MIN
-      : turnaroundMedianMin(db, input.origin, latestAirline, sinceTs);
+      : turnaroundMedianMin(db, input.origin, latestAirline, sinceTs, input.nowSec);
 
   // Case 1: Airborne and headed to origin.
   if (
@@ -664,7 +668,7 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
 
   const sinceTs = input.nowSec - LOOKBACK_DAYS * DAY_SEC;
   const group = weekdayGroup(input.dateWat);
-  const flights = routeFlights(db, input.origin, input.dest, sinceTs);
+  const flights = routeFlights(db, input.origin, input.dest, sinceTs, input.nowSec);
   const candidates: ForecastCandidate[] = [];
   const insufficient: InsufficientFlight[] = [];
 
@@ -675,6 +679,7 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
       input.dest,
       flightNo,
       sinceTs,
+      input.nowSec,
       group,
     );
 
@@ -685,6 +690,7 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
         input.dest,
         flightNo,
         sinceTs,
+        input.nowSec,
         null,
       );
     }
@@ -695,7 +701,7 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
     }
 
     const rawMinutes = sampleTimestamps.map(minuteOfDayWat).sort((left, right) => left - right);
-    const dep = latestDeparture(db, input.origin, input.dest, flightNo, sinceTs);
+    const dep = latestDeparture(db, input.origin, input.dest, flightNo, sinceTs, input.nowSec);
     const latestAirline = dep?.airline ?? null;
     const adjusted = adjustForInboundTail(
       db,
