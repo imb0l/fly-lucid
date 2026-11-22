@@ -139,6 +139,65 @@ describe('applySnapshot transitions', () => {
     applySnapshot(db, [], 5010 + 86_401);
     expect(db.prepare('SELECT count(*) AS n FROM aircraft_state').get()).toEqual({ n: 0 });
   });
+
+  it('backfills a null DEP destination on touchdown when the feed omits destination in flight (UY433 pattern)', () => {
+    const db = makeDb();
+    // Parked at LOS with no destination in feed.
+    applySnapshot(db, [observe({ ts: 1000, flt: 'UY433', orig: 'LOS', dest: null })], 1000);
+    // Takeoff at LOS with dest still null.
+    applySnapshot(
+      db,
+      [observe({ ts: 1060, flt: 'UY433', orig: 'LOS', dest: null, onGround: false, altFt: 2600, gsKt: 180 })],
+      1060,
+    );
+    expect(eventRows(db)).toEqual([
+      { hex: 'TEST01', kind: 'DEP', airport: 'LOS', dest: null, ts: 1060, flt: 'UY433' },
+    ]);
+
+    // Touchdown at ABV coordinates (9.0068, 7.2632) with dest still null in feed.
+    const res = applySnapshot(
+      db,
+      [
+        observe({
+          ts: 1300,
+          flt: 'UY433',
+          orig: 'LOS',
+          dest: null,
+          onGround: true,
+          lat: 9.0068,
+          lon: 7.2632,
+          altFt: 0,
+          gsKt: 0,
+        }),
+      ],
+      1300,
+    );
+    expect(res).toEqual({ deps: 0, arrs: 1 });
+    expect(eventRows(db)).toEqual([
+      { hex: 'TEST01', kind: 'DEP', airport: 'LOS', dest: 'ABV', ts: 1060, flt: 'UY433' },
+      { hex: 'TEST01', kind: 'ARR', airport: 'ABV', dest: null, ts: 1300, flt: 'UY433' },
+    ]);
+  });
+
+  it('backfills a null DEP flight number and destination when they appear on a later airborne frame', () => {
+    const db = makeDb();
+    applySnapshot(db, [observe({ ts: 1000, flt: null, orig: 'LOS', dest: null })], 1000);
+    applySnapshot(
+      db,
+      [observe({ ts: 1030, flt: null, orig: 'LOS', dest: null, onGround: false, altFt: 1500, gsKt: 165 })],
+      1030,
+    );
+    expect(eventRows(db)[0]).toMatchObject({ kind: 'DEP', airport: 'LOS', dest: null, flt: null });
+
+    applySnapshot(
+      db,
+      [observe({ ts: 1090, flt: 'P47443', orig: 'LOS', dest: 'ABV', onGround: false, altFt: 6500, gsKt: 260 })],
+      1090,
+    );
+    expect(eventRows(db)).toEqual([
+      { hex: 'TEST01', kind: 'DEP', airport: 'LOS', dest: 'ABV', ts: 1030, flt: 'P47443' },
+    ]);
+  });
 });
 
 describe('applySnapshot replay of the saved fixtures', () => {

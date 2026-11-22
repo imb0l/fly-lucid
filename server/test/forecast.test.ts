@@ -235,6 +235,28 @@ describe('forecast on a seeded database', () => {
     const details = plan.map((row) => row.detail).join('\n');
     expect(details).toContain('events_lookup');
   });
+
+  it('anchors split schedule slots on the slot nearest the query time', () => {
+    const base = watsMidnightUtc(TODAY);
+    // Four older 12:45 departures plus the two newest at 17:50: more than the
+    // 90-minute slot gap apart, so they form distinct schedule slots.
+    const timestamps = [10, 8, 6, 4].map(
+      (daysBack) => base - daysBack * 86_400 + (12 * 60 + 45) * 60,
+    );
+    timestamps.push(
+      base - 2 * 86_400 + (17 * 60 + 50) * 60,
+      base - 1 * 86_400 + (17 * 60 + 50) * 60,
+    );
+
+    // Querying the evening slot must not average in the old 12:45 regime.
+    const evening = estimateTightForecast(timestamps, null, 17 * 60 + 45);
+    expect(evening.p50).toBeGreaterThanOrEqual(17 * 60 + 40);
+    expect(evening.p50).toBeLessThanOrEqual(18 * 60);
+
+    const midday = estimateTightForecast(timestamps, null, 12 * 60 + 30);
+    expect(midday.p50).toBeGreaterThanOrEqual(12 * 60 + 35);
+    expect(midday.p50).toBeLessThanOrEqual(13 * 60);
+  });
 });
 
 describe('history tail link on a seeded database', () => {
@@ -330,5 +352,46 @@ describe('history tail link on a seeded database', () => {
     });
     const candidate = forecast(db, QUERY).candidates.find((c) => c.flightNo === FLIGHT)!;
     expect(candidate.tail).toEqual({ reg: TAIL, status: 'unknown', adjusted: false });
+  });
+
+  it('floors an ad-hoc inbound arrival at the physical turnaround time', () => {
+    const db = linkedDb(null);
+    const base = watsMidnightUtc(TODAY);
+    const arrivalSec = base + (14 * 60 + 20) * 60;
+    // Ad-hoc inbound flight number with no prior arrivals at LOS: there is no
+    // lateness history, but the aircraft has physically landed at 14:20.
+    db.prepare(`
+      INSERT INTO events (hex, reg, flt, airline, kind, airport, dest, ts)
+      VALUES ('TODAYADHOC', @reg, 'P47999', 'APO', 'ARR', 'LOS', NULL, @ts)
+    `).run({ reg: TAIL, ts: arrivalSec });
+
+    // The arrival must already be observed for the tail link to apply.
+    const candidate = forecast(db, { ...QUERY, nowSec: arrivalSec + 10 * 60 }).candidates[0]!;
+
+    expect(candidate.flightNo).toBe(FLIGHT);
+    expect(candidate.tail).toEqual({ reg: TAIL, status: 'landed_inbound', adjusted: true });
+    // 14:20 + the 45-minute turnaround floor = 15:05, later than the 14:40
+    // historical departures, even without any inbound lateness samples.
+    expect(candidate.p50).toBeGreaterThanOrEqual(15 * 60 + 5);
+    expect(candidate.p10).toBeGreaterThanOrEqual(15 * 60 + 5);
+    expect(candidate.p50).toBeGreaterThan(14 * 60 + 40);
+  });
+
+  it('does not invent an outstation readiness floor when aircraft_state is stale', () => {
+    const db = linkedDb(null);
+    const base = watsMidnightUtc(TODAY);
+    db.prepare(`
+      INSERT INTO aircraft_state (hex, reg, lat, lon, on_ground, ts, updated_at)
+      VALUES ('STALETAIL', @reg, 9.0068, 7.2632, 1, @ts, @updatedAt)
+    `).run({ reg: TAIL, ts: NOW_SEC - 900, updatedAt: NOW_SEC - 600 });
+    db.prepare(`
+      INSERT INTO events (hex, reg, flt, airline, kind, airport, dest, ts)
+      VALUES ('TODAYABV', @reg, 'P47988', 'APO', 'ARR', 'ABV', NULL, @ts)
+    `).run({ reg: TAIL, ts: base + 12 * 3600 + 30 * 60 });
+
+    const candidate = forecast(db, QUERY).candidates[0]!;
+    expect(candidate.flightNo).toBe(FLIGHT);
+    expect(candidate.tail).toEqual({ reg: TAIL, status: 'unknown', adjusted: false });
+    expect(candidate.p50).toBe(14 * 60 + 40);
   });
 });

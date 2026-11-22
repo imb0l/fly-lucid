@@ -31,7 +31,7 @@ for (const line of fs.readFileSync(boardPath, 'utf8').split('\n')) {
   legs.push({ sched, flt, orig: o, dest: d, carrier, p50, win, method, n: Number(n), schedTs: tsOf(sched), p50Ts: tsOf(p50), loTs: tsOf(lo), hiTs: tsOf(hi) });
 }
 
-const prefix = day === '2026-11-19' ? 'fr24-19nov-hist' : null;
+const prefix = `fr24-${day.slice(8, 10)}${['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'][M - 1]}-hist`;
 const rowsByOrigin = new Map();
 const csvInAt = process.argv.indexOf('--csv-in');
 if (csvInAt !== -1 && process.argv[csvInAt + 1]) {

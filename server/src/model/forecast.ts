@@ -36,6 +36,8 @@ const CRUISE_SPEED_KT = 340;
 const HISTORY_TAIL_SLOPE = 0.5;
 /** Oldest arrival still treated as the aircraft's inbound leg. */
 const HISTORY_TAIL_MAX_SEC = 12 * 3600;
+/** Minimum gap (minutes) between sorted departure minutes that splits distinct schedule slots. */
+const SLOT_CLUSTER_GAP_MIN = 90;
 /** Seconds in a day. */
 const DAY_SEC = 86_400;
 /** Africa/Lagos (WAT) is a fixed UTC+1 offset. */
@@ -410,7 +412,51 @@ export function estimateTightForecast(
     return { ts, min, clampedMin: min, w };
   });
 
-  const sortedRawMins = rawItems.map((item) => item.min).sort((left, right) => left - right);
+  const byMinAsc = [...rawItems].sort((left, right) => left.min - right.min);
+  const clusters: WeightedDepSample[][] = [];
+  for (const item of byMinAsc) {
+    const current = clusters[clusters.length - 1];
+    const prev = current?.[current.length - 1];
+    if (current === undefined || prev === undefined || item.min - prev.min > SLOT_CLUSTER_GAP_MIN) {
+      clusters.push([item]);
+    } else {
+      current.push(item);
+    }
+  }
+
+  let activeItems: WeightedDepSample[] = rawItems;
+  if (clusters.length > 1) {
+    const nearSlot = clusters
+      .filter((c) => {
+        const med = c[Math.floor((c.length - 1) * 0.5)]!.min;
+        return (
+          (c.length >= 2 || (c.includes(rawItems[0]!) && Math.abs(med - atMin) <= 60)) &&
+          Math.abs(med - atMin) <= SLOT_CLUSTER_GAP_MIN &&
+          clusters.some(
+            (other) =>
+              other !== c &&
+              Math.abs(other[Math.floor((other.length - 1) * 0.5)]!.min - atMin) > 120,
+          )
+        );
+      })
+      .sort(
+        (a, b) =>
+          Math.abs(a[Math.floor((a.length - 1) * 0.5)]!.min - atMin) -
+          Math.abs(b[Math.floor((b.length - 1) * 0.5)]!.min - atMin),
+      )[0];
+    if (nearSlot !== undefined) {
+      activeItems = [...nearSlot].sort((left, right) => right.ts - left.ts);
+    } else if (rawItems.length >= 2) {
+      const newestCluster = clusters.find(
+        (c) => c.length >= 2 && c.includes(rawItems[0]!) && c.includes(rawItems[1]!),
+      );
+      if (newestCluster !== undefined) {
+        activeItems = [...newestCluster].sort((left, right) => right.ts - left.ts);
+      }
+    }
+  }
+
+  const sortedRawMins = activeItems.map((item) => item.min).sort((left, right) => left - right);
   const sampleMed = sortedRawMins[Math.floor((sortedRawMins.length - 1) * 0.5)]!;
   const absDevs = sortedRawMins
     .map((min) => Math.abs(min - sampleMed))
@@ -418,12 +464,17 @@ export function estimateTightForecast(
   const mad = Math.max(8, absDevs[Math.floor((absDevs.length - 1) * 0.5)]!);
   const trimBand = Math.max(18, Math.min(50, Math.round(1.5 * mad)));
 
-  const trimmed: WeightedDepSample[] = rawItems.map((item) => ({
+  const trimmed: WeightedDepSample[] = activeItems.map((item) => ({
     ...item,
     clampedMin: Math.max(sampleMed - trimBand, Math.min(sampleMed + trimBand, item.min)),
   }));
 
+  const allTrimmed: WeightedDepSample[] = rawItems.map((item) => ({
+    ...item,
+    clampedMin: Math.max(sampleMed - trimBand, Math.min(sampleMed + trimBand, item.min)),
+  }));
   const totalW = trimmed.reduce((sum, item) => sum + item.w, 0);
+  const allTotalW = allTrimmed.reduce((sum, item) => sum + item.w, 0);
   const wMean =
     totalW > 0
       ? trimmed.reduce((sum, item) => sum + item.clampedMin * item.w, 0) / totalW
@@ -468,12 +519,11 @@ export function estimateTightForecast(
   const p90 = Math.min(1439, Math.max(p50, p50 + halfHigh));
   const lower = Math.max(0, atMin - WINDOW_BEFORE_MIN);
   const upper = Math.min(1439, atMin + WINDOW_AFTER_MIN);
-  const hitW = trimmed.reduce(
+  const hitW = allTrimmed.reduce(
     (sum, item) => sum + (item.clampedMin >= lower && item.clampedMin <= upper ? item.w : 0),
     0,
   );
-  const score = totalW > 0 ? hitW / totalW : 0;
-
+  const score = allTotalW > 0 ? hitW / allTotalW : 0;
   return { p10, p50, p90, score };
 }
 
@@ -521,7 +571,6 @@ function adjustForInboundTail(
     latestAirline === null
       ? DEFAULT_TURNAROUND_MIN
       : turnaroundMedianMin(db, input.origin, latestAirline, sinceTs, input.nowSec);
-
   // Case 1: Airborne and headed to origin.
   if (
     state.on_ground === 0 &&
@@ -596,9 +645,11 @@ function landedInboundShift(
   db: Db,
   input: ForecastInput,
   reg: string | null,
+  latestAirline: string | null,
   sinceTs: number,
   samples: number[],
-): { timestamps: number[]; tail: TailInfo } | null {
+  rawMinutesAsc: readonly number[],
+): { timestamps: number[]; readyFloorMin: number | null; tail: TailInfo } | null {
   if (reg === null || input.feedStale || input.dateWat !== todayWat(input.nowSec)) {
     return null;
   }
@@ -615,7 +666,7 @@ function landedInboundShift(
       since: input.nowSec - HISTORY_TAIL_MAX_SEC,
       ref: input.nowSec,
     });
-  if (inbound === undefined || inbound.flt === null) {
+  if (inbound === undefined) {
     return null;
   }
   const departedSince = db
@@ -629,31 +680,59 @@ function landedInboundShift(
   if (departedSince !== undefined) {
     return null;
   }
-  const priorArrivals = db
-    .prepare<
-      { origin: string; flt: string; since: number; before: number },
-      { ts: number }
-    >(
-      "SELECT ts FROM events WHERE kind='ARR' AND airport = :origin AND flt = :flt AND ts >= :since AND ts < :before",
-    )
-    .all({
-      origin: input.origin,
-      flt: inbound.flt,
-      since: sinceTs,
-      before: watDayStartSec(input.dateWat),
-    })
-    .map((row) => minuteOfDayWat(row.ts))
-    .sort((left, right) => left - right);
-  if (priorArrivals.length < MIN_SAMPLES) {
-    return null;
+
+  const turnaroundMin =
+    latestAirline === null
+      ? DEFAULT_TURNAROUND_MIN
+      : turnaroundMedianMin(db, input.origin, latestAirline, sinceTs, input.nowSec);
+  const readyTs = Math.floor(inbound.ts + turnaroundMin * 60);
+  const readyFloorMin =
+    watDateStr(readyTs) === input.dateWat ? minuteOfDayWat(readyTs) : null;
+
+  if (inbound.flt !== null) {
+    const priorArrivals = db
+      .prepare<
+        { origin: string; flt: string; since: number; before: number },
+        { ts: number }
+      >(
+        "SELECT ts FROM events WHERE kind='ARR' AND airport = :origin AND flt = :flt AND ts >= :since AND ts < :before",
+      )
+      .all({
+        origin: input.origin,
+        flt: inbound.flt,
+        since: sinceTs,
+        before: watDayStartSec(input.dateWat),
+      })
+      .map((row) => minuteOfDayWat(row.ts))
+      .sort((left, right) => left - right);
+    if (priorArrivals.length >= MIN_SAMPLES) {
+      const medianMin = priorArrivals[Math.floor(priorArrivals.length / 2)]!;
+      const latenessMin = wrapMinutes(minuteOfDayWat(inbound.ts) - medianMin);
+      const shiftSec = Math.round(HISTORY_TAIL_SLOPE * latenessMin * 60);
+      return {
+        timestamps: samples.map((ts) => ts + shiftSec),
+        readyFloorMin,
+        tail: { reg, status: 'landed_inbound', adjusted: true },
+      };
+    }
   }
-  const medianMin = priorArrivals[Math.floor(priorArrivals.length / 2)]!;
-  const latenessMin = wrapMinutes(minuteOfDayWat(inbound.ts) - medianMin);
-  const shiftSec = Math.round(HISTORY_TAIL_SLOPE * latenessMin * 60);
-  return {
-    timestamps: samples.map((ts) => ts + shiftSec),
-    tail: { reg, status: 'landed_inbound', adjusted: true },
-  };
+
+  const unadjustedMed =
+    rawMinutesAsc.length > 0
+      ? rawMinutesAsc[Math.floor((rawMinutesAsc.length - 1) * 0.5)]!
+      : 0;
+  if (
+    readyFloorMin !== null &&
+    readyFloorMin > unadjustedMed &&
+    readyTs >= input.nowSec - 15 * 60
+  ) {
+    return {
+      timestamps: samples,
+      readyFloorMin,
+      tail: { reg, status: 'landed_inbound', adjusted: true },
+    };
+  }
+  return null;
 }
 
 /**
@@ -713,10 +792,24 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
     );
     const landed = adjusted.tail.adjusted
       ? null
-      : landedInboundShift(db, input, dep?.reg ?? null, sinceTs, sampleTimestamps);
+      : landedInboundShift(
+          db,
+          input,
+          dep?.reg ?? null,
+          latestAirline,
+          sinceTs,
+          sampleTimestamps,
+          rawMinutes,
+        );
+    const effectiveReadyFloorMin =
+      adjusted.readyFloorMin !== null &&
+      landed?.readyFloorMin !== undefined &&
+      landed.readyFloorMin !== null
+        ? Math.max(adjusted.readyFloorMin, landed.readyFloorMin)
+        : (adjusted.readyFloorMin ?? landed?.readyFloorMin ?? null);
     const stats = estimateTightForecast(
       landed?.timestamps ?? sampleTimestamps,
-      adjusted.readyFloorMin,
+      effectiveReadyFloorMin,
       input.atMin,
     );
 

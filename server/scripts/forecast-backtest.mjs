@@ -42,7 +42,7 @@ for (const r of db.prepare("SELECT flt, airport AS o, dest AS d, ts FROM events 
 const train = [];
 for (const r of harvest) if (r.schedDep && r.realDep) {
   const delay = (r.realDep - r.schedDep) / 60;
-  if (Math.abs(delay) < 300) train.push({ flt: r.flt, o: r.orig, d: r.dest, air: r.airlineIcao, day: F.watDateStr(r.realDep), delay });
+  if (Math.abs(delay) < 300) train.push({ flt: r.flt, o: r.orig, d: r.dest, air: r.airlineIcao, day: F.watDateStr(r.realDep), delay, schedClock: F.minuteOfDayWat(r.schedDep) });
 }
 const poolCache = new Map();
 const poolFor = (day) => { if (!poolCache.has(day)) poolCache.set(day, train.filter(x => x.day < day)); return poolCache.get(day); };
@@ -90,11 +90,14 @@ function predictLeg(t, pool, dayStart) {
   const wd = hist.filter(x => { const dd = new Date((x + 3600) * 1000).getUTCDay(); return dd >= 1 && dd <= 5; });
   const used = wd.length >= 5 ? wd : hist;
   if (used.length >= F.MIN_SAMPLES) {
-    // atMin only feeds the unused `score` field, so the placeholder does not affect p50/p10/p90
-    const m = F.estimateTightForecast(used, null, 14 * 60);
+    const slotAtMin = ((Math.round(delayPred) % 1440) + 1440) % 1440;
+    const m = F.estimateTightForecast(used, null, slotAtMin);
     const histP50 = shiftNear(m.p50, delayPred);
     const center = 0.5 * histP50 + 0.5 * delayPred;
-    return { p50: center, p10: center - (m.p50 - m.p10), p90: center + (m.p90 - m.p50), method: 'blend', histN: used.length, schedMin, histP50, delayPred };
+    const disagree = Math.abs(histP50 - delayPred);
+    const halfLo = (m.p50 - m.p10) + 0.25 * disagree;
+    const halfHi = (m.p90 - m.p50) + 0.40 * disagree;
+    return { p50: center, p10: center - halfLo, p90: center + halfHi, method: 'blend', histN: used.length, schedMin, histP50, delayPred };
   }
   return { p50: delayPred, p10: delayPred - spread.lo * SPAN_MULT, p90: delayPred + spread.hi * SPAN_MULT, method: 'delay-prior', histN: used.length, schedMin, delayPred };
 }
@@ -142,19 +145,23 @@ if (MODE === 'backtest') {
 }
 
 if (MODE === 'board') {
-  const DAY = '2026-11-19';
-  const sched19 = JSON.parse(fs.readFileSync(path.join(ROOT, 'data/fr24-19nov-schedule.json'), 'utf8')).sched19;
+  const DAY = process.argv[4] && /^\d{4}-\d{2}-\d{2}$/.test(process.argv[4]) ? process.argv[4] : '2026-11-19';
+  const [, mm, dd] = DAY.split('-');
+  const tag = `${dd}${['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'][Number(mm) - 1]}`;
+  const rawSched = JSON.parse(fs.readFileSync(path.join(ROOT, `data/fr24-${tag}-schedule.json`), 'utf8'));
+  const schedRows = rawSched[`sched${dd}`] ?? rawSched.sched19 ?? (Array.isArray(rawSched) ? rawSched : []);
   const seen = new Map();
   const domestic = new Set(db.prepare('select iata from airports').all().map(r => r.iata));
-  for (const r of sched19) {
+  for (const r of schedRows) {
     if (!r.flt || !r.schedDep || !domestic.has(r.orig) || !domestic.has(r.dest)) continue;
     const k = keyOf(r.flt, r.orig, r.dest, r.schedDep);
     if (!seen.has(k)) seen.set(k, { schedTs: r.schedDep, air: r.airlineIcao, airName: r.airlineName, flt: r.flt, o: r.orig, d: r.dest });
   }
   const dayStart = dayStartUtc(DAY);
+  const boardPool = train.filter(x => x.day < DAY);
   const out = [];
   for (const t of seen.values()) {
-    const p = predictLeg(t, train, dayStart);
+    const p = predictLeg(t, boardPool, dayStart);
     out.push({ flt: t.flt, orig: t.o, dest: t.d, air: t.air, airName: t.airName, schedWat: hhmm(p.schedMin), p50: hhmm(p.p50), p10: hhmm(p.p10), p90: hhmm(p.p90), p50Min: +p.p50.toFixed(1), p10Min: +p.p10.toFixed(1), p90Min: +p.p90.toFixed(1), method: p.method, histN: p.histN });
   }
   out.sort((a, b) => a.schedWat.localeCompare(b.schedWat) || a.flt.localeCompare(b.flt));
@@ -172,7 +179,8 @@ if (MODE === 'board') {
     ...out.map(r => `| ${r.schedWat} | ${r.flt} | ${r.orig}-${r.dest} | ${r.air ?? '?'} | ${r.p50} | ${r.p10}-${r.p90} | ${r.method} | ${r.histN} |`),
     '',
   ].join('\n');
-  fs.writeFileSync(path.join(ROOT, 'data/board-19nov.md'), md);
-  fs.writeFileSync(path.join(ROOT, 'data/board-19nov.json'), JSON.stringify(out, null, 2));
-  console.log(JSON.stringify({ legs: out.length, byMethod }));
+  fs.writeFileSync(path.join(ROOT, `data/board-${tag}.md`), md);
+  fs.writeFileSync(path.join(ROOT, `data/board-${tag}.json`), JSON.stringify(out, null, 2));
+  if (process.argv[5]) fs.writeFileSync(path.join(ROOT, process.argv[5]), md);
+  console.log(JSON.stringify({ day: DAY, legs: out.length, byMethod }));
 }
