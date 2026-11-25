@@ -170,7 +170,7 @@ if (MODE === 'board') {
     `# Departure forecast for ${DAY} (WAT), frozen before the day`,
     '',
     `Legs: ${out.length} unique scheduled departures. Method counts: ${JSON.stringify(byMethod)}.`,
-    'Method: "blend" = 0.5 x history-model p50 + 0.5 x (schedule + shrunk flight/carrier delay); "delay-prior" = schedule + shrunk delay where history has fewer than 5 samples.',
+    'Method: "blend" = 0.65 x history-model p50 + 0.35 x (schedule + shrunk flight/carrier delay); "delay-prior" = schedule + shrunk delay where history has fewer than 5 samples.',
     'Window: blend uses history p10/p90 offsets around the blended p50; delay-prior uses carrier delay p10/p90 spread x span multiplier.',
     'Schedule time is an input to this experiment only, not a product output.',
     '',
