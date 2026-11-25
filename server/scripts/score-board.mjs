@@ -1,17 +1,21 @@
 // Score a frozen board against FR24 airport-departure pages. Run `pnpm -C server build` first.
-// Usage: node server/scripts/score-board.mjs <board.md> <day YYYY-MM-DD> [dataDir]
+// Usage: node server/scripts/score-board.mjs <board.md> <day YYYY-MM-DD> [dataDir] [--db | --csv-in <csv>] [--csv <out>]
+//   --db        build ground truth from server/data/fly.db (poller DEP rows, earliest ts per flt|orig|dest)
+//   --csv-in    build ground truth from a saved CSV instead of the raw pages
+//   --csv       also write the matched ground truth as CSV
 // Board rows: | sched | flt | ORIG-DEST | carrier | p50 | p10-p90 | method | n |
 // FR24 rows: data/fr24-<ddmonyy>-hist-<ORIG>-p<n>.json (and legacy un-suffixed files for LOS).
 // Match key: flt|orig|dest, one-to-one nearest, window [sched-6h, sched+12h]. Never key on minute-of-day alone.
 import fs from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
 const boardPath = process.argv[2];
 const day = process.argv[3];
-const dataDir = process.argv[4] ?? path.join(ROOT, 'data');
+const dataDir = process.argv[4] && !process.argv[4].startsWith('--') ? process.argv[4] : path.join(ROOT, 'data');
 if (!boardPath || !day) {
-  console.error('usage: node server/scripts/score-board.mjs <board.md> <YYYY-MM-DD> [dataDir]');
+  console.error('usage: node server/scripts/score-board.mjs <board.md> <YYYY-MM-DD> [dataDir] [--db | --csv-in <csv>] [--csv <out>]');
   process.exit(2);
 }
 const MATCH_BEFORE_SEC = 6 * 3600;
@@ -49,6 +53,40 @@ if (csvInAt !== -1 && process.argv[csvInAt + 1]) {
       real: c[idx('real_ts')] === '' ? null : Number(c[idx('real_ts')]),
       status: c[idx('status')] ?? '',
     });
+  }
+}
+const fromDb = process.argv.indexOf('--db') !== -1;
+if (fromDb) {
+  // Score from the project's own poller database instead of the raw FR24 pages.
+  // A usable actual is a DEP row with a flight number and destination; the same
+  // flight can be observed several times, so keep the earliest departure.
+  const require = createRequire(path.join(ROOT, 'server/package.json'));
+  const Database = require('better-sqlite3');
+  const db = new Database(path.join(ROOT, 'server/data/fly.db'), { readonly: true });
+  try {
+    const rows = db.prepare(`
+      SELECT flt, airport AS orig, dest, MIN(ts) AS ts
+      FROM events
+      WHERE kind = 'DEP' AND flt IS NOT NULL AND dest IS NOT NULL
+        AND ts >= ? AND ts < ?
+      GROUP BY flt, airport, dest
+      ORDER BY ts
+    `).all(DAY_START_UTC, DAY_START_UTC + 86400);
+    for (const r of rows) {
+      if (!rowsByOrigin.has(r.orig)) rowsByOrigin.set(r.orig, new Map());
+      rowsByOrigin.get(r.orig).set(`${r.flt}|${r.dest}|${r.ts}`, {
+        flt: r.flt, orig: r.orig, dest: r.dest,
+        board_sched_wat: '',
+        fr24_sched_ts: r.ts,
+        sched: r.ts,
+        real_ts: r.ts,
+        real: r.ts,
+        real_wat: watOf(r.ts),
+        status: 'poller',
+      });
+    }
+  } finally {
+    db.close();
   }
 }
 const re = /^fr24-(\d\d)([a-z]{3})\d*-hist-(?:([A-Z]{3})-)?p-?\d+\.json$/;
@@ -106,14 +144,15 @@ const row = (pairs) => {
 const fmt = (x, d = 1) => x.toFixed(d);
 
 console.log(`# Board score — ${day} (WAT)\n`);
-console.log(`Board: \`${path.relative(ROOT, boardPath)}\`  FR24 pages: \`${path.relative(ROOT, dataDir)}/fr24-${day.slice(8, 10)}${['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'][M - 1]}-hist-*.json\`\n`);
+if (fromDb) console.log(`Board: \`${path.relative(ROOT, boardPath)}\`  Poller actuals: \`${path.relative(ROOT, path.join(ROOT, 'server/data/fly.db'))}\`\n`);
+else console.log(`Board: \`${path.relative(ROOT, boardPath)}\`  FR24 pages: \`${path.relative(ROOT, dataDir)}/fr24-${day.slice(8, 10)}${['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'][M - 1]}-hist-*.json\`\n`);
 console.log('| Join step | Legs |');
 console.log('|---|---|');
 console.log(`| Board legs | ${legs.length} |`);
-console.log(`| Origins with FR24 data | ${rowsByOriginArr.size} (${[...rowsByOriginArr.keys()].sort().join(', ')}) |`);
-console.log(`| Legs with no FR24 origin data | ${legs.filter((b) => !rowsByOriginArr.has(b.orig)).length} |`);
+console.log(`| Origins with ${fromDb ? 'poller' : 'FR24'} data | ${rowsByOriginArr.size} (${[...rowsByOriginArr.keys()].sort().join(', ')}) |`);
+console.log(`| Legs with no ${fromDb ? 'poller' : 'FR24'} origin data | ${legs.filter((b) => !rowsByOriginArr.has(b.orig)).length} |`);
 console.log(`| Matched (flt\\|orig\\|dest, one-to-one) | ${matched.length} |`);
-console.log(`| Matched, no FR24 row | ${unmatched.length} |`);
+console.log(`| Matched, no ${fromDb ? 'poller' : 'FR24'} row | ${unmatched.length} |`);
 console.log(`| Matched, real departure (scored) | ${scored.length} |`);
 console.log(`| Matched, no real departure (unscored) | ${unscored.length}: ${Object.entries(statusCount).sort((a, b) => b[1] - a[1]).map(([s, c]) => `${c} ${s}`).join(', ')} |`);
 console.log('\n## Accuracy (scored legs only)\n');
@@ -133,7 +172,7 @@ for (const o of [...new Set(scored.map((p) => p.b.orig))].sort()) {
   console.log(`| ${o} | ${s.n} | ${fmt(s.mae)} | ${fmt(s.med)} | ${fmt(s.schedMae)} | ${fmt(s.cov, 0)}% |`);
 }
 if (unmatched.length) {
-  console.log('\n## Matched, no FR24 row\n');
+  console.log(`\n## Matched, no ${fromDb ? 'poller' : 'FR24'} row\n`);
   for (const b of unmatched) console.log(`- ${b.sched} ${b.flt} ${b.orig}-${b.dest}`);
 }
 
