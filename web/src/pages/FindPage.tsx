@@ -164,7 +164,10 @@ export default function FindPage() {
             </div>
           ) : (
             <div className="table-scroll">
-              <p className="hint">About 1 in 20 similar flights left earlier.</p>
+              <p className="hint">
+                Takeoff estimates, not boarding times. About 1 in 20 similar flights left earlier than the conservative
+                takeoff time.
+              </p>
               <table className="results">
                 <thead>
                   <tr>
@@ -211,7 +214,7 @@ export default function FindPage() {
                           {fmtMinutesOfDay(candidate.p10)}–{fmtMinutesOfDay(candidate.p90)}
                           {candidate.safeBy && (
                             <div className="small">
-                              <span className="pill">Be at the gate by {fmtMinutesOfDay(candidate.safeBy)}</span>
+                              <span className="pill">Likely departed by {fmtMinutesOfDay(candidate.safeBy)}</span>
                             </div>
                           )}
                         </td>
