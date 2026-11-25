@@ -93,7 +93,7 @@ function predictLeg(t, pool, dayStart) {
     const slotAtMin = ((Math.round(delayPred) % 1440) + 1440) % 1440;
     const m = F.estimateTightForecast(used, null, slotAtMin);
     const histP50 = shiftNear(m.p50, delayPred);
-    const center = 0.5 * histP50 + 0.5 * delayPred;
+    const center = 0.65 * histP50 + 0.35 * delayPred;
     const disagree = Math.abs(histP50 - delayPred);
     const halfLo = (m.p50 - m.p10) + 0.25 * disagree;
     const halfHi = (m.p90 - m.p50) + 0.40 * disagree;

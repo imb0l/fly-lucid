@@ -23,6 +23,12 @@ const MAX_CANDIDATES = 10;
 const STATE_FRESH_SEC = 120;
 /** Exponential recency half-life (in days) for weighting observed departures. */
 export const RECENCY_HALF_LIFE_DAYS = 6.0;
+/**
+ * Minutes to subtract from p10 for `safeBy`, by the predicted third of day
+ * (`p50`): early, midday, then evening. Calibrated to ~5% of observed
+ * departures leaving before `safeBy`.
+ */
+export const SAFE_BY_DELTA_MIN: readonly [number, number, number] = [3, 13, 58];
 /** Half-width floor and caps (minutes) for the [p10, p90] likely-takeoff window. */
 const MIN_HALF_WINDOW_MIN = 12;
 const MAX_HALF_LOW_MIN = 52;
@@ -60,6 +66,7 @@ export interface ForecastCandidate {
   p10: number;
   p50: number;
   p90: number;
+  safeBy: number;
   tail: TailInfo;
 }
 
@@ -812,6 +819,13 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
       effectiveReadyFloorMin,
       input.atMin,
     );
+    let safeByDelta = SAFE_BY_DELTA_MIN[2];
+    if (stats.p50 < 585) {
+      safeByDelta = SAFE_BY_DELTA_MIN[0];
+    } else if (stats.p50 < 845) {
+      safeByDelta = SAFE_BY_DELTA_MIN[1];
+    }
+    const safeBy = Math.max(0, Math.min(1439, stats.p10 - safeByDelta));
 
     candidates.push({
       flightNo,
@@ -821,6 +835,7 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
       p10: stats.p10,
       p50: stats.p50,
       p90: stats.p90,
+      safeBy,
       tail: landed?.tail ?? adjusted.tail,
     });
   }

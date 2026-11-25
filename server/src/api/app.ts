@@ -58,6 +58,7 @@ export interface SearchCandidate {
   p10: string;
   p50: string;
   p90: string;
+  safeBy: string;
   tail: TailInfo;
 }
 
@@ -255,6 +256,7 @@ export function buildApp(db: Db, options: BuildAppOptions = {}): FastifyInstance
           p10: formatWatTime(candidate.p10),
           p50: formatWatTime(candidate.p50),
           p90: formatWatTime(candidate.p90),
+          safeBy: formatWatTime(candidate.safeBy),
           tail: {
             reg: candidate.tail.reg,
             status: candidate.tail.status,

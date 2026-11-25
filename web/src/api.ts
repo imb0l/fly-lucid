@@ -58,6 +58,7 @@ export interface Candidate {
   p10: number;
   p50: number;
   p90: number;
+  safeBy: string;
   tail: TailInfo;
 }
 

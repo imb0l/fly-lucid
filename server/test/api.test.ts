@@ -226,6 +226,7 @@ describe('GET /api/search', () => {
         p10: '14:40',
         p50: '14:40',
         p90: '14:40',
+        safeBy: '13:42',
         tail: { reg: '5N-LATEST', status: 'unknown', adjusted: false },
       },
     ]);

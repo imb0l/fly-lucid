@@ -164,6 +164,7 @@ export default function FindPage() {
             </div>
           ) : (
             <div className="table-scroll">
+              <p className="hint">About 1 in 20 similar flights left earlier.</p>
               <table className="results">
                 <thead>
                   <tr>
@@ -208,6 +209,11 @@ export default function FindPage() {
                         </td>
                         <td>
                           {fmtMinutesOfDay(candidate.p10)}–{fmtMinutesOfDay(candidate.p90)}
+                          {candidate.safeBy && (
+                            <div className="small">
+                              <span className="pill">Be at the gate by {fmtMinutesOfDay(candidate.safeBy)}</span>
+                            </div>
+                          )}
                         </td>
                         <td className="num">{fmtPercent(candidate.score)}</td>
                         <td className="num">{candidate.n}</td>

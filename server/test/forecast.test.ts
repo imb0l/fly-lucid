@@ -7,6 +7,7 @@ import {
   floorToReady,
   minuteOfDayWat,
   percentileNearestRank,
+  SAFE_BY_DELTA_MIN,
   scoreWindow,
   todayWat,
   weekdayGroup,
@@ -189,6 +190,29 @@ describe('forecast on a seeded database', () => {
     // Same-day search with a stale feed never adjusts and reports unknown.
     // Today's DEPs are after NOW_SEC, so the latest observed DEP is yesterday's.
     expect(candidate.tail).toEqual({ reg: '5N-T1', status: 'unknown', adjusted: false });
+  });
+
+  it('subtracts the late-third delta from p10 for safeBy', () => {
+    const { db } = seededDb();
+    const result = forecast(db, {
+      origin: 'LOS',
+      dest: 'ABV',
+      dateWat: TODAY,
+      atMin: 14 * 60,
+      nowSec: NOW_SEC,
+      feedStale: true,
+    });
+
+    expect(result.candidates).toHaveLength(1);
+    const candidate = result.candidates[0]!;
+    // 14:40+ WAT is in the late third of the day, so the delta is 58 minutes.
+    expect(candidate.p50).toBeGreaterThanOrEqual(845);
+    expect(candidate.safeBy).toBe(candidate.p10 - SAFE_BY_DELTA_MIN[2]);
+    expect(candidate.safeBy).toBeLessThanOrEqual(candidate.p10);
+    for (const entry of result.candidates) {
+      expect(entry.safeBy).toBeGreaterThanOrEqual(0);
+      expect(entry.safeBy).toBeLessThanOrEqual(1439);
+    }
   });
 
   it('tightens the interval and tracks recent regime shifts via estimateTightForecast', () => {
