@@ -61,6 +61,36 @@ h3 {
   color: var(--muted);
 }
 
+/* ---------- focus ---------- */
+
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.btn:focus-visible {
+  outline-offset: 1px;
+}
+
+.nav-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  text-decoration: none;
+}
+
+/* Keyboard-focused scroll regions (tables with tabindex="0"). */
+.table-scroll:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* ---------- shell ---------- */
 
 .app {
@@ -302,8 +332,13 @@ h3 {
 
 .field select:focus,
 .field input:focus {
-  outline: 2px solid var(--accent-soft);
   border-color: var(--accent);
+}
+
+.field select:focus-visible,
+.field input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .field select:disabled {
@@ -365,6 +400,28 @@ h3 {
 
 .table-scroll {
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: #b6c0cb transparent;
+}
+
+.table-scroll::-webkit-scrollbar {
+  height: 10px;
+}
+
+.table-scroll::-webkit-scrollbar-track {
+  background: #f2f4f6;
+  border-radius: 999px;
+}
+
+.table-scroll::-webkit-scrollbar-thumb {
+  background: #b6c0cb;
+  border: 2px solid var(--surface);
+  border-radius: 999px;
+}
+
+.table-scroll::-webkit-scrollbar-thumb:hover {
+  background: #8f9dab;
 }
 
 table.results {
@@ -392,6 +449,12 @@ table.results th {
 
 table.results tbody tr:hover {
   background: #fafbfc;
+}
+
+table.results tbody tr:focus-within {
+  background: var(--accent-soft);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 table.results td.num {
@@ -466,10 +529,31 @@ table.results td.num {
   min-height: 360px;
 }
 
+/* Basemap/first-paint overlay drawn inside .map-shell (z-index below the legend). */
+.map-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  padding: 16px;
+  text-align: center;
+  font-size: 0.9rem;
+  color: var(--muted);
+  background: rgba(238, 241, 245, 0.72);
+  pointer-events: none;
+  z-index: 4;
+}
+
+.map-loading p {
+  margin: 0;
+}
+
 .map-legend {
   position: absolute;
   left: 12px;
   bottom: 12px;
+  z-index: 5;
   display: flex;
   gap: 14px;
   padding: 6px 10px;
@@ -522,5 +606,26 @@ table.results td.num {
 
   .map {
     height: 62vh;
+  }
+}
+
+/* Touch devices: comfortable targets and a grip-sized table scrollbar. */
+@media (pointer: coarse) {
+  .btn-small {
+    min-height: 40px;
+    min-width: 40px;
+    padding: 8px 12px;
+  }
+
+  .nav-link {
+    padding: 10px 14px;
+  }
+
+  .table-scroll::-webkit-scrollbar {
+    height: 14px;
+  }
+
+  .table-scroll::-webkit-scrollbar-thumb {
+    border-width: 3px;
   }
 }

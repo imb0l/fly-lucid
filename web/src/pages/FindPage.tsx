@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { describeError, getJson, type Airport, type Candidate, type SearchResponse } from '../api';
 import { addWatchItem, loadWatchlist, watchKey } from '../watchlist';
-import { fmtMinutesOfDay, fmtPercent, fmtWatDate, todayWat } from '../format';
+import { addDaysWat, fmtMinutesOfDay, fmtPercent, fmtWatDate, fmtWatTimestamp, todayWat } from '../format';
 
 const TAIL_LABELS: Record<string, string> = {
   inbound: 'Inbound aircraft',
@@ -17,6 +17,8 @@ const DISCLAIMER = 'Based on observed departures over the last 28 days. Not an a
 export default function FindPage() {
   const [airports, setAirports] = useState<Airport[] | null>(null);
   const [airportsError, setAirportsError] = useState<string | null>(null);
+  const [airportsLoading, setAirportsLoading] = useState(true);
+  const [airportsAttempt, setAirportsAttempt] = useState(0);
   const [origin, setOrigin] = useState('');
   const [dest, setDest] = useState('');
   const [date, setDate] = useState(todayWat);
@@ -29,20 +31,26 @@ export default function FindPage() {
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
+    setAirportsLoading(true);
+    setAirportsError(null);
     getJson<Airport[]>('/api/airports', controller.signal)
       .then((list) => {
         if (cancelled) return;
         setAirports(list);
-        setAirportsError(null);
       })
       .catch((err: unknown) => {
-        if (!cancelled) setAirportsError(describeError(err));
+        if (cancelled) return;
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setAirportsError(describeError(err));
+      })
+      .finally(() => {
+        if (!cancelled) setAirportsLoading(false);
       });
     return () => {
       cancelled = true;
       controller.abort();
     };
-  }, []);
+  }, [airportsAttempt]);
 
   const sortedAirports = useMemo(
     () => (airports ? [...airports].sort((a, b) => a.iata.localeCompare(b.iata)) : []),
@@ -105,8 +113,8 @@ export default function FindPage() {
         <div className="form-grid">
           <label className="field">
             <span>From</span>
-            <select value={origin} onChange={(e) => setOrigin(e.target.value)} disabled={!airports}>
-              <option value="">{airports ? 'Select origin' : 'Loading airports…'}</option>
+            <select value={origin} onChange={(e) => setOrigin(e.target.value)} disabled={!airports || airportsLoading}>
+              <option value="">{airports ? 'Select origin' : airportsLoading ? 'Loading airports…' : 'Airports unavailable'}</option>
               {sortedAirports.map((airport) => (
                 <option key={airport.iata} value={airport.iata}>
                   {airport.iata} — {airport.name}
@@ -116,8 +124,8 @@ export default function FindPage() {
           </label>
           <label className="field">
             <span>To</span>
-            <select value={dest} onChange={(e) => setDest(e.target.value)} disabled={!airports}>
-              <option value="">{airports ? 'Select destination' : 'Loading airports…'}</option>
+            <select value={dest} onChange={(e) => setDest(e.target.value)} disabled={!airports || airportsLoading}>
+              <option value="">{airports ? 'Select destination' : airportsLoading ? 'Loading airports…' : 'Airports unavailable'}</option>
               {sortedAirports.map((airport) => (
                 <option key={airport.iata} value={airport.iata}>
                   {airport.iata} — {airport.name}
@@ -127,7 +135,13 @@ export default function FindPage() {
           </label>
           <label className="field">
             <span>Date (WAT)</span>
-            <input type="date" value={date} min={todayWat()} onChange={(e) => setDate(e.target.value)} />
+            <input
+              type="date"
+              value={date}
+              min={todayWat()}
+              max={addDaysWat(todayWat(), 60)}
+              onChange={(e) => setDate(e.target.value)}
+            />
           </label>
           <label className="field">
             <span>Leave at (WAT)</span>
@@ -138,32 +152,71 @@ export default function FindPage() {
           <button type="submit" className="btn btn-primary" disabled={busy || !airports}>
             {busy ? 'Searching…' : 'Forecast takeoff'}
           </button>
-          {airportsError && <span className="form-error">Airports unavailable: {airportsError}</span>}
-          {error && <span className="form-error">{error}</span>}
+          {airportsError && (
+            <span className="form-error" role="alert">
+              Airports unavailable: {airportsError}{' '}
+              <button
+                type="button"
+                className="btn btn-small"
+                onClick={() => setAirportsAttempt((attempt) => attempt + 1)}
+                disabled={airportsLoading}
+              >
+                {airportsLoading ? 'Retrying…' : 'Retry'}
+              </button>
+            </span>
+          )}
+          {error && (
+            <span className="form-error" role="alert">
+              {error}
+            </span>
+          )}
         </div>
       </form>
 
       <p className="disclaimer">{DISCLAIMER}</p>
 
-      {result && (
-        <section className="card">
-          <div className="card-head">
-            <h2>
-              {result.origin} → {result.dest} · {fmtWatDate(result.date)} · leaving at {result.at} WAT
-            </h2>
-            {result.feedStale && <span className="pill pill-warn">Live feed stale</span>}
-          </div>
-
-          {result.candidates.length === 0 ? (
-            <div className="empty">
-              <p>No flight on this route can be forecast yet.</p>
-              <p>
-                A forecast needs at least <strong>5 observed departures</strong> per flight over the last 28 days. That
-                data is still building, so there is nothing to rank here yet.
-              </p>
+      <div aria-live="polite">
+        {result && (
+          <section className="card">
+            <div className="card-head">
+              <h2>
+                {result.origin} → {result.dest} · {fmtWatDate(result.date)} · leaving at {result.at} WAT
+              </h2>
+              {result.feedStale && <span className="pill pill-warn">Live feed stale</span>}
             </div>
-          ) : (
-            <div className="table-scroll">
+
+            <p className="small muted">Data current to {fmtWatTimestamp(result.dataAsOf)}</p>
+            {result.feedStale && (
+              <p className="hint">
+                The live feed is stale, so current tail status is unavailable. Takeoff windows use the 28-day departure
+                history only.
+              </p>
+            )}
+
+            {result.candidates.length === 0 ? (
+              <div className="empty">
+                {result.insufficient.length === 0 ? (
+                  <p>No flights were observed on this route in the last 28 days.</p>
+                ) : (
+                  <>
+                    <p>No flight on this route can be forecast yet.</p>
+                    <p>
+                      A forecast needs at least <strong>5 observed departures</strong> per flight over the last 28 days.
+                      That data is still building, so there is nothing to rank here yet.
+                    </p>
+                  </>
+                )}
+                {result.feedStale && (
+                  <p>A stale live feed can hide flights that did operate, so this view may be incomplete.</p>
+                )}
+              </div>
+            ) : (
+              <div
+                className="table-scroll"
+                tabIndex={0}
+                role="region"
+                aria-label="Forecast results table, scrollable"
+              >
               <p className="hint">
                 Takeoff estimates, not boarding times. About 1 in 20 similar flights left earlier than the conservative
                 takeoff time.
@@ -211,7 +264,10 @@ export default function FindPage() {
                           )}
                         </td>
                         <td>
-                          {fmtMinutesOfDay(candidate.p10)}–{fmtMinutesOfDay(candidate.p90)}
+                          <div>Expected ~{fmtMinutesOfDay(candidate.p50)}</div>
+                          <div className="small muted">
+                            {fmtMinutesOfDay(candidate.p10)}–{fmtMinutesOfDay(candidate.p90)}
+                          </div>
                           {candidate.safeBy && (
                             <div className="small">
                               <span className="pill">Likely departed by {fmtMinutesOfDay(candidate.safeBy)}</span>
@@ -266,8 +322,9 @@ export default function FindPage() {
               </ul>
             </div>
           )}
-        </section>
-      )}
+          </section>
+        )}
+      </div>
     </section>
   );
 }

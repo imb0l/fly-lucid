@@ -85,6 +85,7 @@ describe('GET /api/health', () => {
       ok: true,
       lastPollTs: NOW_SEC - 20,
       lastPollOk: true,
+      lastPollOkTs: NOW_SEC - 20,
       feedStale: false,
       aircraftNow: 1,
     });
@@ -106,8 +107,17 @@ describe('GET /api/health', () => {
       ok: false,
       lastPollTs: NOW_SEC - 300,
       lastPollOk: true,
+      lastPollOkTs: NOW_SEC - 300,
       feedStale: true,
     });
+    await app.close();
+  });
+
+  it('marks the health response as no-store', async () => {
+    const app = makeApp(seedDb());
+    const response = await app.inject({ method: 'GET', url: '/api/health' });
+
+    expect(response.headers['cache-control']).toBe('no-store');
     await app.close();
   });
 });
@@ -138,6 +148,35 @@ describe('GET /api/live', () => {
     });
     await app.close();
   });
+
+  it('excludes rows whose observation is stale even when written recently', async () => {
+    const db = seedDb();
+    db.prepare(
+      `INSERT INTO aircraft_state
+         (hex, reg, type, flt, airline, lat, lon, alt_ft, gs_kt, hdg,
+          on_ground, orig, dest, ts, updated_at)
+       VALUES ('GHI789', '5N-OLD', 'B738', NULL, 'APO', 9.1, 7.3, 30000, 400, 90,
+               0, 'ABV', 'LOS', ?, ?)`,
+    ).run(NOW_SEC - 300, NOW_SEC - 5);
+
+    const app = makeApp(db);
+    const response = await app.inject({ method: 'GET', url: '/api/live' });
+    const body = response.json() as { hex: string }[];
+
+    expect(body.map((aircraft) => aircraft.hex)).toEqual(['ABC123']);
+
+    const health = await app.inject({ method: 'GET', url: '/api/health' });
+    expect(health.json()).toMatchObject({ aircraftNow: 1 });
+    await app.close();
+  });
+
+  it('marks the live response as no-store', async () => {
+    const app = makeApp(seedDb());
+    const response = await app.inject({ method: 'GET', url: '/api/live' });
+
+    expect(response.headers['cache-control']).toBe('no-store');
+    await app.close();
+  });
 });
 
 describe('GET /api/airports', () => {
@@ -150,6 +189,7 @@ describe('GET /api/airports', () => {
       { iata: 'ABV', name: 'Nnamdi Azikiwe International Airport' },
       { iata: 'LOS', name: 'Murtala Muhammed International Airport' },
     ]);
+    expect(response.headers['cache-control']).toBe('public, max-age=300');
     await app.close();
   });
 });
@@ -223,10 +263,10 @@ describe('GET /api/search', () => {
         // All five samples are at 14:40, inside the [13:30, 15:00] window.
         score: 1,
         n: 5,
-        p10: '14:40',
+        p10: '14:28',
         p50: '14:40',
-        p90: '14:40',
-        safeBy: '13:42',
+        p90: '14:52',
+        safeBy: '13:30',
         tail: { reg: '5N-LATEST', status: 'unknown', adjusted: false },
       },
     ]);
@@ -243,6 +283,7 @@ describe('GET /api/search', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ date: '2026-07-12', at: '14:00' });
+    expect(response.headers['cache-control']).toBe('no-store');
     await app.close();
   });
 });
@@ -262,12 +303,46 @@ describe('GET /api/flights/:flt', () => {
       flt: 'P47443',
       origin: 'LOS',
       dest: 'ABV',
+      dataAsOf: new Date((NOW_SEC - 20) * 1000).toISOString(),
+      feedStale: false,
       samples: DEP_DATES.map((dateWat) => ({
         dateWat,
         timeWat: '14:40',
         weekday: true,
       })),
     });
+    await app.close();
+  });
+
+  it('accepts a lowercase flight number and normalizes it', async () => {
+    const db = seedDb();
+    seedDepartures(db);
+    const app = makeApp(db);
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/flights/p47443?origin=LOS&dest=ABV',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ flt: 'P47443', origin: 'LOS', dest: 'ABV' });
+    await app.close();
+  });
+
+  it('rejects a malformed flight number', async () => {
+    const app = makeApp(seedDb());
+    const response = await app.inject({ method: 'GET', url: '/api/flights/TOOLONG' });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: 'invalid_flight' });
+    await app.close();
+  });
+
+  it('rejects a flight number with invalid characters', async () => {
+    const app = makeApp(seedDb());
+    const response = await app.inject({ method: 'GET', url: '/api/flights/P%2047443' });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: 'invalid_flight' });
     await app.close();
   });
 
@@ -297,12 +372,22 @@ describe('GET /api/flights/:flt', () => {
       flt: 'P47443',
       origin: null,
       dest: null,
+      dataAsOf: new Date((NOW_SEC - 20) * 1000).toISOString(),
+      feedStale: false,
       samples: DEP_DATES.map((dateWat) => ({
         dateWat,
         timeWat: '14:40',
         weekday: true,
       })),
     });
+    await app.close();
+  });
+
+  it('marks the flight response as no-store', async () => {
+    const app = makeApp(seedDb());
+    const response = await app.inject({ method: 'GET', url: '/api/flights/P47443' });
+
+    expect(response.headers['cache-control']).toBe('no-store');
     await app.close();
   });
 });

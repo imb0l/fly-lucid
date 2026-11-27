@@ -78,6 +78,8 @@ export interface FlightSamplesResponse {
   flt: string;
   origin: string | null;
   dest: string | null;
+  dataAsOf: string | null;
+  feedStale: boolean;
   samples: { dateWat: string; timeWat: string; weekday: boolean }[];
 }
 
@@ -85,6 +87,12 @@ interface InvalidAirport {
   error: 'invalid_airport';
   field: 'origin' | 'dest';
 }
+
+interface InvalidFlight {
+  error: 'invalid_flight';
+}
+
+const FLIGHT_NO_RE = /^[A-Z0-9]{2,6}$/;
 
 interface InvalidDate {
   error: 'invalid_date';
@@ -152,7 +160,7 @@ export function buildApp(db: Db, options: BuildAppOptions = {}): FastifyInstance
 
   app.get('/api/health', (_request, reply) => {
     const health: HealthResponse = queries.health(now());
-    return reply.send(health);
+    return reply.header('cache-control', 'no-store').send(health);
   });
 
   app.get('/api/live', (_request, reply) => {
@@ -169,10 +177,11 @@ export function buildApp(db: Db, options: BuildAppOptions = {}): FastifyInstance
 
   app.get('/api/airports', (_request, reply) => {
     const airports: AirportSummary[] = queries.airports();
-    return reply.send(airports);
+    return reply.header('cache-control', 'public, max-age=300').send(airports);
   });
 
   app.get('/api/search', (request, reply) => {
+    reply.header('cache-control', 'no-store');
     const query = request.query as Record<string, unknown>;
     const nowSec = now();
 
@@ -274,8 +283,15 @@ export function buildApp(db: Db, options: BuildAppOptions = {}): FastifyInstance
   });
 
   app.get<{ Params: { flt: string } }>('/api/flights/:flt', (request, reply) => {
+    reply.header('cache-control', 'no-store');
     const query = request.query as Record<string, unknown>;
     const nowSec = now();
+
+    const flt = request.params.flt.trim().toUpperCase();
+    if (!FLIGHT_NO_RE.test(flt)) {
+      const body: InvalidFlight = { error: 'invalid_flight' };
+      return reply.code(400).send(body);
+    }
 
     const originParam = query.origin;
     const origin = originParam === undefined || originParam === '' ? null : parseIata(originParam);
@@ -296,7 +312,14 @@ export function buildApp(db: Db, options: BuildAppOptions = {}): FastifyInstance
       return reply.code(400).send(body);
     }
 
-    const flt = request.params.flt.trim();
+    const lastPollOkTs = queries.latestPollOkTs();
+    const feedStale =
+      lastPollOkTs === null || nowSec - lastPollOkTs > FEED_STALE_SEC;
+    const dataAsOf =
+      lastPollOkTs === null
+        ? null
+        : new Date(lastPollOkTs * 1000).toISOString();
+
     const sinceTs = nowSec - LOOKBACK_DAYS * DAY_SEC;
     const samples = queries
       .departureSamples(flt, origin, dest, sinceTs)
@@ -309,7 +332,7 @@ export function buildApp(db: Db, options: BuildAppOptions = {}): FastifyInstance
         };
       });
 
-    const body: FlightSamplesResponse = { flt, origin, dest, samples };
+    const body: FlightSamplesResponse = { flt, origin, dest, dataAsOf, feedStale, samples };
     return reply.send(body);
   });
 

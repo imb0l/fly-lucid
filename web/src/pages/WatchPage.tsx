@@ -1,16 +1,23 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { describeError, getJson, type SearchResponse } from '../api';
 import { fmtMinutesOfDay, fmtPercent, fmtWatClock, fmtWatDate, todayWat } from '../format';
-import { loadWatchlist, removeWatchItem, watchKey, type WatchItem } from '../watchlist';
+import {
+  getWatchlistStorageError,
+  loadWatchlist,
+  removePastWatchItems,
+  removeWatchItem,
+  watchKey,
+  type WatchItem,
+} from '../watchlist';
 
 interface RowState {
   status: 'loading' | 'ok' | 'missing' | 'error' | 'stale';
   score?: number;
   n?: number;
-  p10?: number;
-  p50?: number;
-  p90?: number;
+  p10?: string;
+  p50?: string;
+  p90?: string;
   tailStatus?: string;
   adjusted?: boolean;
   message?: string;
@@ -24,32 +31,71 @@ const TAIL_LABELS: Record<string, string> = {
   unknown: 'Unknown',
 };
 
+const AUTO_REFRESH_MS = 60_000;
+
 export default function WatchPage() {
-  const [items, setItems] = useState<WatchItem[]>(loadWatchlist);
+  const [items, setItems] = useState<WatchItem[]>(() => loadWatchlist());
+  const [storageError, setStorageError] = useState<string | null>(() => getWatchlistStorageError());
   const [rows, setRows] = useState<Record<string, RowState>>({});
   const [tick, setTick] = useState(0);
   const [checkedAt, setCheckedAt] = useState<number | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Mirror rows so an items change (e.g. a removal) can skip refetching rows
+  // that already have data instead of reloading the whole watchlist.
+  const rowsRef = useRef<Record<string, RowState>>({});
+  const loadedTickRef = useRef(-1);
+
+  useEffect(() => {
+    rowsRef.current = rows;
+  }, [rows]);
 
   useEffect(() => {
     if (items.length === 0) {
+      loadedTickRef.current = tick;
       setRows({});
+      setRefreshing(false);
       return;
     }
+
+    // A tick bump is a manual or automatic refresh: reload every row. A pure
+    // items change (removal) only loads rows without data yet.
+    const forceAll = loadedTickRef.current !== tick;
+    loadedTickRef.current = tick;
+    const toLoad = forceAll
+      ? items
+      : items.filter((item) => {
+          const row = rowsRef.current[watchKey(item)];
+          return row === undefined || row.status === 'loading';
+        });
+    if (toLoad.length === 0) {
+      setRefreshing(false);
+      return;
+    }
+
     let cancelled = false;
     const controller = new AbortController();
-    const pending: Record<string, RowState> = {};
-    for (const item of items) pending[watchKey(item)] = { status: 'loading' };
-    setRows(pending);
+    setRefreshing(true);
+    // Keep previously fetched rows on screen while the refresh is in flight.
+    setRows((previous) => {
+      let changed = false;
+      const next: Record<string, RowState> = { ...previous };
+      for (const item of toLoad) {
+        const key = watchKey(item);
+        if (next[key] !== undefined) continue;
+        next[key] = { status: 'loading' };
+        changed = true;
+      }
+      return changed ? next : previous;
+    });
 
     const load = async (): Promise<void> => {
-      const next: Record<string, RowState> = {};
       const today = todayWat();
-      await Promise.all(
-        items.map(async (item) => {
+      const fresh = await Promise.all(
+        toLoad.map(async (item): Promise<[string, RowState]> => {
           const key = watchKey(item);
           if (item.date < today) {
-            next[key] = { status: 'stale', message: 'Date has passed — remove it.' };
-            return;
+            return [key, { status: 'stale', message: 'Date has passed — remove it.' }];
           }
           try {
             const query = new URLSearchParams({
@@ -60,28 +106,41 @@ export default function WatchPage() {
             });
             const data = await getJson<SearchResponse>(`/api/search?${query.toString()}`, controller.signal);
             const candidate = data.candidates.find((c) => c.flightNo === item.flightNo);
-            next[key] = candidate
-              ? {
-                  status: 'ok',
-                  score: candidate.score,
-                  n: candidate.n,
-                  p10: candidate.p10,
-                  p50: candidate.p50,
-                  p90: candidate.p90,
-                  tailStatus: candidate.tail.status,
-                  adjusted: candidate.tail.adjusted,
-                }
-              : { status: 'missing', message: 'Not in the current forecast — too few observations.' };
+            if (!candidate) {
+              return [key, { status: 'missing', message: 'Not in the current forecast — too few observations.' }];
+            }
+            return [
+              key,
+              {
+                status: 'ok',
+                score: candidate.score,
+                n: candidate.n,
+                p10: candidate.p10,
+                p50: candidate.p50,
+                p90: candidate.p90,
+                tailStatus: candidate.tail.status,
+                adjusted: candidate.tail.adjusted,
+              },
+            ];
           } catch (err) {
-            if (controller.signal.aborted) return;
-            next[key] = { status: 'error', message: describeError(err) };
+            return [key, { status: 'error', message: describeError(err) }];
           }
         }),
       );
-      if (!cancelled) {
-        setRows(next);
-        setCheckedAt(Date.now() / 1000);
-      }
+
+      if (cancelled) return;
+      const results: Record<string, RowState> = {};
+      for (const [key, state] of fresh) results[key] = state;
+      setRows((previous) => {
+        const merged: Record<string, RowState> = {};
+        for (const item of items) {
+          const key = watchKey(item);
+          merged[key] = results[key] ?? previous[key] ?? { status: 'loading' as const };
+        }
+        return merged;
+      });
+      setCheckedAt(Date.now() / 1000);
+      setRefreshing(false);
     };
 
     void load();
@@ -91,8 +150,49 @@ export default function WatchPage() {
     };
   }, [items, tick]);
 
+  // Auto-refresh while the tab is visible; paused when hidden and resumed
+  // (immediately) when it becomes visible again.
+  useEffect(() => {
+    const refresh = (): void => setTick((value) => value + 1);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') refresh();
+    }, AUTO_REFRESH_MS);
+    const onVisibilityChange = (): void => {
+      if (document.visibilityState === 'visible') refresh();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, []);
+
+  function dropRows(keys: Iterable<string>): void {
+    const removed = new Set(keys);
+    setRows((previous) => {
+      const next: Record<string, RowState> = {};
+      for (const [key, row] of Object.entries(previous)) {
+        if (!removed.has(key)) next[key] = row;
+      }
+      return next;
+    });
+  }
+
   function onRemove(item: WatchItem): void {
+    const key = watchKey(item);
     setItems(removeWatchItem(item));
+    dropRows([key]);
+    setStorageError(getWatchlistStorageError());
+  }
+
+  const today = todayWat();
+  const pastItems = items.filter((item) => item.date < today);
+
+  function onRemovePast(): void {
+    if (pastItems.length === 0) return;
+    setItems(removePastWatchItems(items, today));
+    dropRows(pastItems.map(watchKey));
+    setStorageError(getWatchlistStorageError());
   }
 
   return (
@@ -100,15 +200,33 @@ export default function WatchPage() {
       <div className="page-head">
         <div>
           <h1>Watchlist</h1>
-          <p className="muted">Saved in this browser only. Scores are re-checked every time you open this page.</p>
+          <p className="muted">
+            Saved in this browser only. Scores refresh when you open this page and every minute while it is visible.
+          </p>
         </div>
         <div className="page-actions">
+          {refreshing && (
+            <span className="muted small" role="status">
+              Updating…
+            </span>
+          )}
           {checkedAt && <span className="muted small">Checked at {fmtWatClock(checkedAt)} WAT</span>}
+          {pastItems.length > 0 && (
+            <button type="button" className="btn" onClick={onRemovePast}>
+              Remove past dates ({pastItems.length})
+            </button>
+          )}
           <button type="button" className="btn" onClick={() => setTick((value) => value + 1)}>
             Refresh scores
           </button>
         </div>
       </div>
+
+      {storageError && (
+        <p className="banner banner-error" role="alert">
+          {storageError}
+        </p>
+      )}
 
       {items.length === 0 ? (
         <div className="card empty">
@@ -158,9 +276,23 @@ export default function WatchPage() {
                       </td>
                       <td className="num">
                         {row.status === 'ok' ? fmtPercent(row.score) : row.status === 'loading' ? '…' : '—'}
+                        {(row.status === 'error' || row.status === 'stale' || row.status === 'missing') && (
+                          <div className="muted small">{row.message}</div>
+                        )}
                       </td>
                       <td>
-                        {row.status === 'ok' ? `${fmtMinutesOfDay(row.p10)}–${fmtMinutesOfDay(row.p90)}` : '—'}
+                        {row.status === 'ok' ? (
+                          <>
+                            <div>
+                              {fmtMinutesOfDay(row.p10)}–{fmtMinutesOfDay(row.p90)}
+                            </div>
+                            {row.p50 !== undefined && (
+                              <div className="muted small">median {fmtMinutesOfDay(row.p50)}</div>
+                            )}
+                          </>
+                        ) : (
+                          '—'
+                        )}
                       </td>
                       <td className="num">{row.status === 'ok' ? row.n : '—'}</td>
                       <td>
@@ -170,7 +302,7 @@ export default function WatchPage() {
                             {row.adjusted && <div className="muted small">takeoff floored</div>}
                           </>
                         ) : (
-                          <span className="muted small">{row.message ?? ''}</span>
+                          <span className="muted">—</span>
                         )}
                       </td>
                       <td>

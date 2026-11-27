@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { describeError, getJson, type FlightHistory } from '../api';
-import { fmtWatDate } from '../format';
+import { fmtWatDate, fmtWatTimestamp } from '../format';
 
 type LoadState =
   | { status: 'idle' | 'loading' }
@@ -14,6 +14,7 @@ export default function FlightPage() {
   const navigate = useNavigate();
   const origin = params.get('origin') ?? '';
   const dest = params.get('dest') ?? '';
+  const routeLabel = origin && dest ? `${origin} → ${dest}` : origin ? `${origin} → ?` : dest ? `? → ${dest}` : '';
   const [state, setState] = useState<LoadState>({ status: 'idle' });
   const [form, setForm] = useState({ flt: '', origin: '', dest: '' });
 
@@ -120,7 +121,7 @@ export default function FlightPage() {
         <div>
           <h1>
             {flt}
-            {origin && dest ? ` · ${origin} → ${dest}` : ''}
+            {routeLabel ? ` · ${routeLabel}` : ''}
           </h1>
           <p className="muted">Observed departure times over the last 28 days. Scheduled times are not stored.</p>
         </div>
@@ -131,8 +132,16 @@ export default function FlightPage() {
         </div>
       </div>
 
-      {state.status === 'loading' && <p className="muted">Loading observations…</p>}
-      {state.status === 'error' && <p className="banner banner-error">{state.message}</p>}
+      {state.status === 'loading' && (
+        <p className="muted" role="status">
+          Loading observations…
+        </p>
+      )}
+      {state.status === 'error' && (
+        <p className="banner banner-error" role="alert">
+          {state.message}
+        </p>
+      )}
 
       {state.status === 'ok' && (
         <div className="card">
@@ -140,14 +149,27 @@ export default function FlightPage() {
             <h2>
               {samples.length} observed departure{samples.length === 1 ? '' : 's'}
             </h2>
+            <p className="muted">Data current to {fmtWatTimestamp(state.data.dataAsOf)}</p>
           </div>
+          {state.data.feedStale && (
+            <p className="banner banner-warn">
+              History may be incomplete because the live feed is stale.
+            </p>
+          )}
           {samples.length === 0 ? (
             <div className="empty">
-              <p>No observed departures stored for this flight yet.</p>
+              <p>
+                No observed departures stored for this flight
+                {routeLabel ? ` on ${routeLabel}` : ''} yet.
+              </p>
               <p>The poller only records departures it sees in the live feed, so a quiet flight will stay empty.</p>
             </div>
           ) : (
-            <div className="table-scroll">
+            <div
+              className="table-scroll"
+              tabIndex={0}
+              aria-label={`Observed departures for ${flt}${routeLabel ? ` on ${routeLabel}` : ''}`}
+            >
               <table className="results">
                 <thead>
                   <tr>

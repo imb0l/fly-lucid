@@ -29,6 +29,13 @@ export const RECENCY_HALF_LIFE_DAYS = 6.0;
  * departures leaving before `safeBy`.
  */
 export const SAFE_BY_DELTA_MIN: readonly [number, number, number] = [3, 13, 58];
+/**
+ * Share of the latest observed departure's residual (against the forecast p50)
+ * carried into the [p10, p90] band, and the cap on that upward shift. Both are
+ * pre-registered from the 25/26 Nov T-60 replay and must not be tuned.
+ */
+const LATEST_RESIDUAL_SLOPE = 0.25;
+const LATEST_RESIDUAL_CAP_MIN = 45;
 /** Half-width floor and caps (minutes) for the [p10, p90] likely-takeoff window. */
 const MIN_HALF_WINDOW_MIN = 12;
 const MAX_HALF_LOW_MIN = 52;
@@ -336,6 +343,7 @@ interface StateRow {
   on_ground: number;
   dest: string | null;
   updated_at: number;
+  flt: string | null;
 }
 
 interface AirportRow {
@@ -402,11 +410,17 @@ function weightedQuantile(
 /**
  * Build recency-weighted, MAD-Winsorized departure samples and compute a
  * momentum-adjusted p50 plus a tight [p10, p90] likely takeoff interval.
+ *
+ * The schedule slot is always chosen from every provided day first. Then, when
+ * `preferredGroup` is set, observations of that weekday group inside the slot
+ * are preferred, but only if they alone reach `MIN_SAMPLES`; a sparse group
+ * must never erase the only evidence for a valid slot.
  */
 export function estimateTightForecast(
   timestamps: readonly number[],
   readyFloorMin: number | null,
   atMin: number,
+  preferredGroup: 'weekday' | 'weekend' | null = null,
 ): { p10: number; p50: number; p90: number; score: number } {
   const byNewest = [...timestamps].sort((left, right) => right - left);
   const newestTs = byNewest[0] ?? 0;
@@ -463,6 +477,17 @@ export function estimateTightForecast(
     }
   }
 
+  // Prefer weekday/weekend observations inside the already-selected slot, but
+  // only when that subgroup alone is large enough to estimate from.
+  if (preferredGroup !== null) {
+    const preferredItems = activeItems.filter(
+      (item) => weekdayGroup(watDateStr(item.ts)) === preferredGroup,
+    );
+    if (preferredItems.length >= MIN_SAMPLES) {
+      activeItems = preferredItems;
+    }
+  }
+
   const sortedRawMins = activeItems.map((item) => item.min).sort((left, right) => left - right);
   const sampleMed = sortedRawMins[Math.floor((sortedRawMins.length - 1) * 0.5)]!;
   const absDevs = sortedRawMins
@@ -508,21 +533,31 @@ export function estimateTightForecast(
   const coreSpread = Math.max(0, q80 - q20);
   const halfLow =
     coreSpread === 0
-      ? 0
+      ? readyFloorMin === null
+        ? MIN_HALF_WINDOW_MIN
+        : 30
       : Math.max(
           MIN_HALF_WINDOW_MIN,
           Math.min(MAX_HALF_LOW_MIN, Math.round(HALF_LOW_MAD_MULT * mad)),
         );
   const halfHigh =
     coreSpread === 0
-      ? 0
+      ? readyFloorMin === null
+        ? MIN_HALF_WINDOW_MIN
+        : 30
       : Math.max(
           MIN_HALF_WINDOW_MIN,
           Math.min(MAX_HALF_HIGH_MIN, Math.round(HALF_HIGH_MAD_MULT * mad)),
         );
 
+  // Identical history is not zero uncertainty. Keep the minimum 12 min band;
+  // a readiness floor inferred from incomplete tail/feed data is even less
+  // certain, so a collapsed floor-derived sample gets a ±30 min epistemic band.
   const rawP10 = Math.max(0, p50 - halfLow);
-  const p10 = readyFloorMin === null ? rawP10 : Math.max(rawP10, readyFloorMin);
+  const p10 =
+    readyFloorMin === null || coreSpread === 0
+      ? rawP10
+      : Math.max(rawP10, readyFloorMin);
   const p90 = Math.min(1439, Math.max(p50, p50 + halfHigh));
   const lower = Math.max(0, atMin - WINDOW_BEFORE_MIN);
   const upper = Math.min(1439, atMin + WINDOW_AFTER_MIN);
@@ -538,30 +573,66 @@ export function estimateTightForecast(
  * Same-day inbound tail adjustment. Returns the tail block plus an optional
  * earliest readiness minute-of-day when the assigned aircraft is inbound or
  * still at an outstation airport.
+ *
+ * `blocked` marks a rejected or unresolved assignment: the caller must not
+ * fall back to the history tail link for it.
  */
 function adjustForInboundTail(
   db: Db,
   input: ForecastInput,
+  flightNo: string,
   dep: LatestDepRow | undefined,
   latestAirline: string | null,
   sinceTs: number,
   samples: number[],
-): { tail: TailInfo; samples: number[]; readyFloorMin: number | null } {
-  const reg = dep?.reg ?? null;
-  const unchanged: TailInfo = { reg, status: 'unknown', adjusted: false };
+): {
+  tail: TailInfo;
+  samples: number[];
+  readyFloorMin: number | null;
+  blocked: boolean;
+} {
+  const priorReg = dep?.reg ?? null;
+  const unknownTail = (reg: string | null): TailInfo => ({
+    reg,
+    status: 'unknown',
+    adjusted: false,
+  });
 
   // The live tail only informs same-day searches with a fresh feed.
-  if (input.dateWat !== todayWat(input.nowSec) || input.feedStale || reg === null) {
-    return { tail: unchanged, samples, readyFloorMin: null };
+  if (input.dateWat !== todayWat(input.nowSec) || input.feedStale || priorReg === null) {
+    return { tail: unknownTail(priorReg), samples, readyFloorMin: null, blocked: false };
   }
 
+  // Guard 1: a fresh state row keyed by this flight number is stronger
+  // evidence than the latest departure history, which can carry yesterday's
+  // tail across a same-day swap. Use it only when it names exactly one reg.
+  const freshFlightRegs = db
+    .prepare<{ fresh: number; flt: string }, { reg: string }>(
+      `SELECT DISTINCT reg FROM aircraft_state
+        WHERE updated_at >= :fresh AND reg IS NOT NULL AND flt IS NOT NULL
+          AND upper(trim(flt)) = upper(trim(:flt))`,
+    )
+    .all({ fresh: input.nowSec - STATE_FRESH_SEC, flt: flightNo })
+    .map((row) => row.reg);
+  const distinctRegs = [...new Set(freshFlightRegs)];
+  if (distinctRegs.length > 1) {
+    // Ambiguous swap: keep the prior reg but never floor on it.
+    return { tail: unknownTail(priorReg), samples, readyFloorMin: null, blocked: true };
+  }
+  const reg = distinctRegs[0] ?? priorReg;
+
+  // Guard 2: the resolved tail's freshest state must not be flying another
+  // flight number, which proves the prior-day assignment is stale.
   const state = db
     .prepare<{ reg: string }, StateRow>(
-      'SELECT lat, lon, gs_kt, on_ground, dest, updated_at FROM aircraft_state WHERE reg = :reg ORDER BY updated_at DESC LIMIT 1',
+      'SELECT lat, lon, gs_kt, on_ground, dest, updated_at, flt FROM aircraft_state WHERE reg = :reg ORDER BY updated_at DESC LIMIT 1',
     )
     .get({ reg });
   if (state === undefined || state.updated_at < input.nowSec - STATE_FRESH_SEC) {
-    return { tail: unchanged, samples, readyFloorMin: null };
+    return { tail: unknownTail(reg), samples, readyFloorMin: null, blocked: false };
+  }
+  if (state.flt !== null && state.flt.trim().toUpperCase() !== flightNo.trim().toUpperCase()) {
+    return { tail: unknownTail(reg), samples, readyFloorMin: null, blocked: true };
   }
 
   const airport = db
@@ -570,7 +641,12 @@ function adjustForInboundTail(
     )
     .get({ iata: input.origin });
   if (airport === undefined || airport.lat === null || airport.lon === null) {
-    return { tail: { reg, status: 'not_inbound', adjusted: false }, samples, readyFloorMin: null };
+    return {
+      tail: { reg, status: 'not_inbound', adjusted: false },
+      samples,
+      readyFloorMin: null,
+      blocked: false,
+    };
   }
 
   const distNm = haversineNm(state.lat, state.lon, airport.lat, airport.lon);
@@ -589,13 +665,19 @@ function adjustForInboundTail(
     const etaSec = input.nowSec + (distNm / speedKt) * 3600;
     const readyTs = Math.floor(etaSec + turnaroundMin * 60);
     if (watDateStr(readyTs) !== input.dateWat) {
-      return { tail: { reg, status: 'inbound_other_day', adjusted: false }, samples, readyFloorMin: null };
+      return {
+        tail: { reg, status: 'inbound_other_day', adjusted: false },
+        samples,
+        readyFloorMin: null,
+        blocked: false,
+      };
     }
     const readyMin = minuteOfDayWat(readyTs);
     return {
       tail: { reg, status: 'inbound', adjusted: true },
       samples: floorToReady(samples, readyMin),
       readyFloorMin: readyMin,
+      blocked: false,
     };
   }
 
@@ -610,11 +692,17 @@ function adjustForInboundTail(
         tail: { reg, status: 'not_inbound', adjusted: true },
         samples: floorToReady(samples, readyMin),
         readyFloorMin: readyMin,
+        blocked: false,
       };
     }
   }
 
-  return { tail: { reg, status: 'not_inbound', adjusted: false }, samples, readyFloorMin: null };
+  return {
+    tail: { reg, status: 'not_inbound', adjusted: false },
+    samples,
+    readyFloorMin: null,
+    blocked: false,
+  };
 }
 
 /** Arrival at the origin used to link a departure to its inbound leg. */
@@ -743,6 +831,20 @@ function landedInboundShift(
 }
 
 /**
+ * Minutes to subtract from p10 for `safeBy`, chosen by the predicted third of
+ * day (`p50`).
+ */
+function safeByDeltaFor(p50: number): number {
+  if (p50 < 585) {
+    return SAFE_BY_DELTA_MIN[0];
+  }
+  if (p50 < 845) {
+    return SAFE_BY_DELTA_MIN[1];
+  }
+  return SAFE_BY_DELTA_MIN[2];
+}
+
+/**
  * Rank the flight numbers on a route by the chance their observed actual
  * takeoff falls inside the window around `atMin`. Returns at most ten ranked
  * candidates plus every flight lacking enough history.
@@ -759,7 +861,7 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
   const insufficient: InsufficientFlight[] = [];
 
   for (const flightNo of flights) {
-    let sampleTimestamps = depSamples(
+    const preferredTimestamps = depSamples(
       db,
       input.origin,
       input.dest,
@@ -768,46 +870,51 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
       input.nowSec,
       group,
     );
+    // Estimation always sees every day so the weekday filter cannot erase the
+    // only evidence for the active schedule slot.
+    const allTimestamps = depSamples(
+      db,
+      input.origin,
+      input.dest,
+      flightNo,
+      sinceTs,
+      input.nowSec,
+      null,
+    );
 
-    if (sampleTimestamps.length < MIN_SAMPLES) {
-      sampleTimestamps = depSamples(
-        db,
-        input.origin,
-        input.dest,
-        flightNo,
-        sinceTs,
-        input.nowSec,
-        null,
-      );
-    }
-
-    if (sampleTimestamps.length < MIN_SAMPLES) {
-      insufficient.push({ flightNo, n: sampleTimestamps.length });
+    if (allTimestamps.length < MIN_SAMPLES) {
+      insufficient.push({ flightNo, n: allTimestamps.length });
       continue;
     }
 
-    const rawMinutes = sampleTimestamps.map(minuteOfDayWat).sort((left, right) => left - right);
+    // `n` reports the preferred group when it has enough history, else all days.
+    const selectedTimestamps =
+      preferredTimestamps.length >= MIN_SAMPLES ? preferredTimestamps : allTimestamps;
+
+    const rawMinutes = selectedTimestamps.map(minuteOfDayWat).sort((left, right) => left - right);
     const dep = latestDeparture(db, input.origin, input.dest, flightNo, sinceTs, input.nowSec);
     const latestAirline = dep?.airline ?? null;
     const adjusted = adjustForInboundTail(
       db,
       input,
+      flightNo,
       dep,
       latestAirline,
       sinceTs,
       rawMinutes,
     );
-    const landed = adjusted.tail.adjusted
-      ? null
-      : landedInboundShift(
-          db,
-          input,
-          dep?.reg ?? null,
-          latestAirline,
-          sinceTs,
-          sampleTimestamps,
-          rawMinutes,
-        );
+    const landed =
+      adjusted.tail.adjusted || adjusted.blocked
+        ? null
+        : landedInboundShift(
+            db,
+            input,
+            adjusted.tail.reg,
+            latestAirline,
+            sinceTs,
+            allTimestamps,
+            rawMinutes,
+          );
     const effectiveReadyFloorMin =
       adjusted.readyFloorMin !== null &&
       landed?.readyFloorMin !== undefined &&
@@ -815,28 +922,58 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
         ? Math.max(adjusted.readyFloorMin, landed.readyFloorMin)
         : (adjusted.readyFloorMin ?? landed?.readyFloorMin ?? null);
     const stats = estimateTightForecast(
-      landed?.timestamps ?? sampleTimestamps,
+      landed?.timestamps ?? allTimestamps,
       effectiveReadyFloorMin,
       input.atMin,
+      group,
     );
-    let safeByDelta = SAFE_BY_DELTA_MIN[2];
-    if (stats.p50 < 585) {
-      safeByDelta = SAFE_BY_DELTA_MIN[0];
-    } else if (stats.p50 < 845) {
-      safeByDelta = SAFE_BY_DELTA_MIN[1];
+    const preShiftSafeBy = Math.max(
+      0,
+      Math.min(1439, stats.p10 - safeByDeltaFor(stats.p50)),
+    );
+    const finalTail = landed?.tail ?? adjusted.tail;
+
+    let p10 = stats.p10;
+    let p50 = stats.p50;
+    let p90 = stats.p90;
+    let safeBy = preShiftSafeBy;
+    // Observed-only prior: when no tail link explains today, the latest all-day
+    // departure still says how late this flight is currently running. Shift the
+    // band up by a quarter of that residual (capped at 45 minutes) and never let
+    // the tier change pull `safeBy` earlier than the unshifted value.
+    if (finalTail.adjusted === false && selectedTimestamps.length >= MIN_SAMPLES) {
+      let latestTs: number | null = null;
+      for (const ts of allTimestamps) {
+        if (ts < input.nowSec && (latestTs === null || ts > latestTs)) {
+          latestTs = ts;
+        }
+      }
+      if (latestTs !== null) {
+        const residual = wrapMinutes(minuteOfDayWat(latestTs) - stats.p50);
+        const delta = Math.min(
+          LATEST_RESIDUAL_CAP_MIN,
+          Math.max(0, Math.round(LATEST_RESIDUAL_SLOPE * residual)),
+        );
+        if (delta > 0) {
+          p10 = Math.max(0, Math.min(1439, p10 + delta));
+          p50 = Math.max(0, Math.min(1439, p50 + delta));
+          p90 = Math.max(0, Math.min(1439, p90 + delta));
+          const shiftedSafeBy = Math.max(0, Math.min(1439, p10 - safeByDeltaFor(p50)));
+          safeBy = Math.max(preShiftSafeBy, shiftedSafeBy);
+        }
+      }
     }
-    const safeBy = Math.max(0, Math.min(1439, stats.p10 - safeByDelta));
 
     candidates.push({
       flightNo,
       airline: latestAirline,
       score: stats.score,
-      n: sampleTimestamps.length,
-      p10: stats.p10,
-      p50: stats.p50,
-      p90: stats.p90,
+      n: selectedTimestamps.length,
+      p10,
+      p50,
+      p90,
       safeBy,
-      tail: landed?.tail ?? adjusted.tail,
+      tail: finalTail,
     });
   }
 

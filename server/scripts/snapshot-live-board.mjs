@@ -15,7 +15,7 @@ const day = process.argv[3] && !process.argv[3].startsWith('--') ? process.argv[
 const once = process.argv.includes('--once');
 const apiBase = process.env.API_BASE ?? 'http://127.0.0.1:8787';
 const HORIZONS_MIN = [120, 60];
-const WINDOW_SEC = 10 * 60; // capture within [targetTs, targetTs + 10m]
+const WINDOW_SEC = 30 * 60; // tolerate short login/reboot gaps; captured_at_ts records the real horizon
 
 const [Y, M, D] = day.split('-').map(Number);
 const DAY_START_UTC = Date.UTC(Y, M - 1, D) / 1000 - 3600; // 00:00 WAT

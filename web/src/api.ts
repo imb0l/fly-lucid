@@ -15,7 +15,8 @@ export class ApiError extends Error {
 export interface Health {
   ok: boolean;
   lastPollTs: number | null;
-  lastPollOk: number | null;
+  lastPollOk: boolean | null;
+  lastPollOkTs: number | null;
   feedStale: boolean;
   aircraftNow: number;
 }
@@ -55,9 +56,9 @@ export interface Candidate {
   bookingUrl: string | null;
   score: number;
   n: number;
-  p10: number;
-  p50: number;
-  p90: number;
+  p10: string;
+  p50: string;
+  p90: string;
   safeBy: string;
   tail: TailInfo;
 }
@@ -90,6 +91,8 @@ export interface FlightHistory {
   origin: string | null;
   dest: string | null;
   samples: FlightSample[];
+  dataAsOf: string | null;
+  feedStale: boolean;
 }
 
 export async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {

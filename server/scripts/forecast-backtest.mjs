@@ -40,9 +40,13 @@ for (const r of harvest) {
 for (const r of db.prepare("SELECT flt, airport AS o, dest AS d, ts FROM events WHERE kind='DEP' AND flt IS NOT NULL").all()) addActual(r.flt, r.o, r.d, r.ts);
 
 const train = [];
+const trainKeys = new Set(); // `${flt}|${o}|${d}|${actualTs}` — exact actual timestamp dedupe across sources
 for (const r of harvest) if (r.schedDep && r.realDep) {
   const delay = (r.realDep - r.schedDep) / 60;
-  if (Math.abs(delay) < 300) train.push({ flt: r.flt, o: r.orig, d: r.dest, air: r.airlineIcao, day: F.watDateStr(r.realDep), delay, schedClock: F.minuteOfDayWat(r.schedDep) });
+  if (Math.abs(delay) < 300) {
+    train.push({ flt: r.flt, o: r.orig, d: r.dest, air: r.airlineIcao, day: F.watDateStr(r.realDep), delay, schedClock: F.minuteOfDayWat(r.schedDep) });
+    trainKeys.add(`${r.flt}|${r.orig}|${r.dest}|${r.realDep}`);
+  }
 }
 const poolCache = new Map();
 const poolFor = (day) => { if (!poolCache.has(day)) poolCache.set(day, train.filter(x => x.day < day)); return poolCache.get(day); };
@@ -91,7 +95,8 @@ function predictLeg(t, pool, dayStart) {
   const used = wd.length >= 5 ? wd : hist;
   if (used.length >= F.MIN_SAMPLES) {
     const slotAtMin = ((Math.round(delayPred) % 1440) + 1440) % 1440;
-    const m = F.estimateTightForecast(used, null, slotAtMin);
+    const targetGroup = [0, 6].includes(new Date((t.schedTs + 3600) * 1000).getUTCDay()) ? 'weekend' : 'weekday';
+    const m = F.estimateTightForecast(hist, null, slotAtMin, targetGroup);
     const histP50 = shiftNear(m.p50, delayPred);
     const center = 0.65 * histP50 + 0.35 * delayPred;
     const disagree = Math.abs(histP50 - delayPred);
@@ -167,7 +172,7 @@ if (MODE === 'board') {
   out.sort((a, b) => a.schedWat.localeCompare(b.schedWat) || a.flt.localeCompare(b.flt));
   const byMethod = out.reduce((m, r) => (m[r.method] = (m[r.method] || 0) + 1, m), {});
   const md = [
-    `# Departure forecast for ${DAY} (WAT), frozen before the day`,
+    `# Departure forecast for ${DAY} (WAT), frozen before first departure`,
     '',
     `Legs: ${out.length} unique scheduled departures. Method counts: ${JSON.stringify(byMethod)}.`,
     'Method: "blend" = 0.65 x history-model p50 + 0.35 x (schedule + shrunk flight/carrier delay); "delay-prior" = schedule + shrunk delay where history has fewer than 5 samples.',

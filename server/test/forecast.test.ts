@@ -179,11 +179,12 @@ describe('forecast on a seeded database', () => {
     expect(candidate.flightNo).toBe(FLIGHT);
     expect(candidate.n).toBe(groupCount);
     expect(candidate.n).toBeGreaterThanOrEqual(5);
-    // Recency-weighted + MAD-Winsorized tight forecast keeps p50 near 14:40
-    // and trims the four 19:10 outliers so the [p10, p90] window stays tight
-    // (< 60 minutes wide instead of the 270-minute 14:40..19:10 span).
-    expect(candidate.p50).toBeGreaterThanOrEqual(14 * 60 + 40);
-    expect(candidate.p50).toBeLessThanOrEqual(15 * 60 + 5);
+    // Recency-weighted + MAD-Winsorized tight forecast anchors on the 14:40 slot
+    // and trims the 19:10 outliers so the [p10, p90] window stays tight (< 60
+    // minutes wide instead of the 270-minute 14:40..19:10 span). The tail is
+    // unadjusted, so the observed-only prior reads yesterday's 19:10 departure
+    // as a +270 residual and applies the 45-minute cap: 14:40 + 45 = 15:25.
+    expect(candidate.p50).toBe(15 * 60 + 25);
     expect(candidate.p90 - candidate.p10).toBeLessThanOrEqual(56);
     expect(candidate.score).toBeGreaterThan(0.5);
     expect(candidate.score).toBeLessThanOrEqual(1);
@@ -280,6 +281,64 @@ describe('forecast on a seeded database', () => {
     const midday = estimateTightForecast(timestamps, null, 12 * 60 + 30);
     expect(midday.p50).toBeGreaterThanOrEqual(12 * 60 + 35);
     expect(midday.p50).toBeLessThanOrEqual(13 * 60);
+  });
+
+  it('picks the all-day schedule slot before preferring weekday observations', () => {
+    // QI522 on 2026-11-26 17:45 WAT: the 17:50 slot had one weekday and one
+    // weekend observation while the older 12:45 slot had many weekdays. The
+    // weekday filter must not shrink the 17:50 slot to a singleton and hand the
+    // forecast to the midday cluster.
+    const db = openDb(':memory:');
+    const insertAirport = db.prepare(
+      'INSERT INTO airports (iata, icao, name, lat, lon) VALUES (?, ?, ?, ?, ?)',
+    );
+    insertAirport.run('LOS', 'DNMM', 'Murtala Muhammed International', 6.5774, 3.3212);
+    insertAirport.run('ABV', 'DNAA', 'Nnamdi Azikiwe International', 9.0068, 7.2632);
+    const insertDep = db.prepare(`
+      INSERT INTO events (hex, reg, flt, airline, kind, airport, dest, ts)
+      VALUES (@hex, @reg, @flt, @airline, 'DEP', @airport, @dest, @ts)
+    `);
+    const base = watsMidnightUtc(TODAY);
+    const dep = (daysBack: number, minute: number): void => {
+      insertDep.run({
+        hex: `QI${daysBack}-${minute}`,
+        reg: `5N-Q${daysBack}`,
+        flt: 'QI522',
+        airline: AIRLINE,
+        airport: 'LOS',
+        dest: 'ABV',
+        ts: base - daysBack * 86_400 + minute * 60,
+      });
+    };
+
+    // Seven weekday departures at 12:45, the newest of them more recent than
+    // the evening observation so the old code's newest-cluster fallback lands
+    // on midday.
+    for (const daysBack of [3, 4, 5, 6, 7, 14, 21]) {
+      dep(daysBack, 12 * 60 + 45);
+    }
+    // One weekday (Mon 16 Feb) and one weekend (Sun 1 Mar) departure at 17:50.
+    dep(14, 17 * 60 + 50);
+    dep(1, 17 * 60 + 50);
+
+    const result = forecast(db, {
+      origin: 'LOS',
+      dest: 'ABV',
+      dateWat: TODAY,
+      atMin: 17 * 60 + 45,
+      nowSec: NOW_SEC,
+      feedStale: true,
+    });
+
+    expect(result.insufficient).toEqual([]);
+    expect(result.candidates).toHaveLength(1);
+    const candidate = result.candidates[0]!;
+    expect(candidate.flightNo).toBe('QI522');
+    // n keeps the weekday count because the weekday group has >= MIN_SAMPLES.
+    expect(candidate.n).toBe(8);
+    // The evening slot wins: p50 near 17:50, never the 12:45 midday cluster.
+    expect(candidate.p50).toBeGreaterThanOrEqual(17 * 60 + 40);
+    expect(candidate.p50).toBeLessThanOrEqual(18 * 60);
   });
 });
 
@@ -395,9 +454,11 @@ describe('history tail link on a seeded database', () => {
     expect(candidate.flightNo).toBe(FLIGHT);
     expect(candidate.tail).toEqual({ reg: TAIL, status: 'landed_inbound', adjusted: true });
     // 14:20 + the 45-minute turnaround floor = 15:05, later than the 14:40
-    // historical departures, even without any inbound lateness samples.
+    // historical departures. The floor is uncertain, so a collapsed sample
+    // spread must retain a ±30 min epistemic band rather than p10=p50=p90.
     expect(candidate.p50).toBeGreaterThanOrEqual(15 * 60 + 5);
-    expect(candidate.p10).toBeGreaterThanOrEqual(15 * 60 + 5);
+    expect(candidate.p10).toBe(candidate.p50 - 30);
+    expect(candidate.p90).toBe(candidate.p50 + 30);
     expect(candidate.p50).toBeGreaterThan(14 * 60 + 40);
   });
 
@@ -416,6 +477,231 @@ describe('history tail link on a seeded database', () => {
     const candidate = forecast(db, QUERY).candidates[0]!;
     expect(candidate.flightNo).toBe(FLIGHT);
     expect(candidate.tail).toEqual({ reg: TAIL, status: 'unknown', adjusted: false });
+    expect(candidate.p50).toBe(14 * 60 + 40);
+  });
+});
+
+describe('observed-only latest residual prior', () => {
+  const TODAY = '2026-03-02'; // Monday, WAT
+  const NOW_SEC = Date.UTC(2026, 2, 2, 15, 30) / 1000; // 16:30 WAT
+  const FLIGHT = 'P47500';
+  const AIRLINE = 'APO';
+
+  /**
+   * Eight earlier weekday departures at `baseMin`, plus the newest observation
+   * on the preceding Sunday (1 Mar) at `latestWeekendMin`. The Sunday departure
+   * is outside the Mon-Fri group, so only the all-day sample set can see it.
+   */
+  function residualDb(baseMin: number, latestWeekendMin: number): Db {
+    const db = openDb(':memory:');
+    const insertAirport = db.prepare(
+      'INSERT INTO airports (iata, icao, name, lat, lon) VALUES (?, ?, ?, ?, ?)',
+    );
+    insertAirport.run('LOS', 'DNMM', 'Murtala Muhammed International', 6.5774, 3.3212);
+    insertAirport.run('ABV', 'DNAA', 'Nnamdi Azikiwe International', 9.0068, 7.2632);
+    const insertDep = db.prepare(`
+      INSERT INTO events (hex, reg, flt, airline, kind, airport, dest, ts)
+      VALUES (@hex, @reg, @flt, @airline, 'DEP', @airport, @dest, @ts)
+    `);
+    const base = watsMidnightUtc(TODAY);
+    const dep = (daysBack: number, minute: number, hex: string): void => {
+      insertDep.run({
+        hex,
+        reg: '5N-R1',
+        flt: FLIGHT,
+        airline: AIRLINE,
+        airport: 'LOS',
+        dest: 'ABV',
+        ts: base - daysBack * 86_400 + minute * 60,
+      });
+    };
+    for (const daysBack of [3, 4, 5, 6, 7, 10, 11, 12]) {
+      dep(daysBack, baseMin, `WD${daysBack}`);
+    }
+    dep(1, latestWeekendMin, 'SUNDAY');
+    return db;
+  }
+
+  function topCandidate(db: Db, atMin: number) {
+    const result = forecast(db, {
+      origin: 'LOS',
+      dest: 'ABV',
+      dateWat: TODAY,
+      atMin,
+      nowSec: NOW_SEC,
+      feedStale: true,
+    });
+    expect(result.candidates).toHaveLength(1);
+    return result.candidates[0]!;
+  }
+
+  it('shifts the band by a quarter of the latest observed residual', () => {
+    // Sunday 11:20 against a 10:00 band: +80 residual, 25% = +20.
+    const candidate = topCandidate(residualDb(10 * 60, 11 * 60 + 20), 10 * 60);
+
+    // The weekend observation never reaches `n`, but it does drive the shift.
+    expect(candidate.n).toBe(8);
+    expect(candidate.tail).toEqual({ reg: '5N-R1', status: 'unknown', adjusted: false });
+    expect(candidate.p10).toBe(10 * 60 + 8);
+    expect(candidate.p50).toBe(10 * 60 + 20);
+    expect(candidate.p90).toBe(10 * 60 + 32);
+    // The shifted p10 is 608; the pre-shift safeBy floor is 587.
+    expect(candidate.safeBy).toBe(10 * 60 - 5);
+  });
+
+  it('caps the shift at 45 minutes', () => {
+    // Sunday 13:20 against a 10:00 band: +200 residual, 25% = 50, capped to 45.
+    const candidate = topCandidate(residualDb(10 * 60, 13 * 60 + 20), 10 * 60);
+
+    expect(candidate.p10).toBe(10 * 60 + 33);
+    expect(candidate.p50).toBe(10 * 60 + 45);
+    expect(candidate.p90).toBe(10 * 60 + 57);
+    expect(candidate.safeBy).toBe(10 * 60 + 20);
+  });
+
+  it('does not shift on a negative latest residual', () => {
+    // Sunday 09:30 before a 10:00 band: -30 residual, floored at 0.
+    const candidate = topCandidate(residualDb(10 * 60, 9 * 60 + 30), 10 * 60);
+
+    expect(candidate.p10).toBe(10 * 60 - 12);
+    expect(candidate.p50).toBe(10 * 60);
+    expect(candidate.p90).toBe(10 * 60 + 12);
+    expect(candidate.safeBy).toBe(10 * 60 - 25);
+  });
+
+  it('never moves safeBy earlier when the shift crosses a p50 tier boundary', () => {
+    // 13:50 band with a Sunday 15:00 departure: +70 residual, 25% = +17.5 -> +18.
+    const candidate = topCandidate(residualDb(13 * 60 + 50, 15 * 60), 13 * 60 + 50);
+
+    expect(candidate.p50).toBe(13 * 60 + 50 + 18); // 848: the late tier (58)
+    expect(candidate.p10).toBe(13 * 60 + 56);
+    // Pre-shift safeBy was 818 - 13 = 805; the shifted tier alone would give
+    // 836 - 58 = 778, so the unshifted floor must win.
+    expect(candidate.safeBy).toBe(13 * 60 + 25);
+  });
+});
+
+describe('fresh aircraft_state tail guard', () => {
+  const TODAY = '2026-03-02'; // Monday, WAT
+  const NOW_SEC = Date.UTC(2026, 2, 2, 12, 0) / 1000; // 13:00 WAT
+  const FLIGHT = 'P47443';
+  const PRIOR_TAIL = '5N-OLD';
+  const INBOUND = 'P47900';
+  const QUERY = {
+    origin: 'LOS',
+    dest: 'ABV',
+    dateWat: TODAY,
+    atMin: 14 * 60,
+    nowSec: NOW_SEC,
+    feedStale: false,
+  };
+
+  /**
+   * Ten prior FLIGHT departures at 14:40 WAT on PRIOR_TAIL, plus ten prior
+   * inbound arrivals at LOS and one today at 12:20 WAT. Without a guard the
+   * landed-inbound link reads +140 minutes of inbound lateness, shifts every
+   * sample by 70 minutes and marks the tail adjusted.
+   */
+  function guardDb(): Db {
+    const db = openDb(':memory:');
+    const insertAirport = db.prepare(
+      'INSERT INTO airports (iata, icao, name, lat, lon) VALUES (?, ?, ?, ?, ?)',
+    );
+    insertAirport.run('LOS', 'DNMM', 'Murtala Muhammed International', 6.5774, 3.3212);
+    insertAirport.run('ABV', 'DNAA', 'Nnamdi Azikiwe International', 9.0068, 7.2632);
+
+    const insertEvent = db.prepare(`
+      INSERT INTO events (hex, reg, flt, airline, kind, airport, dest, ts)
+      VALUES (@hex, @reg, @flt, 'APO', @kind, @airport, @dest, @ts)
+    `);
+    const base = watsMidnightUtc(TODAY);
+    for (let daysBack = 1; daysBack <= 10; daysBack += 1) {
+      const midnight = base - daysBack * 86_400;
+      insertEvent.run({
+        hex: `OLD${daysBack}`,
+        reg: PRIOR_TAIL,
+        flt: FLIGHT,
+        kind: 'DEP',
+        airport: 'LOS',
+        dest: 'ABV',
+        ts: midnight + 14 * 3600 + 40 * 60,
+      });
+      insertEvent.run({
+        hex: `PREV${daysBack}`,
+        reg: PRIOR_TAIL,
+        flt: INBOUND,
+        kind: 'ARR',
+        airport: 'LOS',
+        dest: null,
+        ts: midnight + 10 * 3600,
+      });
+    }
+    insertEvent.run({
+      hex: 'TODAYIN',
+      reg: PRIOR_TAIL,
+      flt: INBOUND,
+      kind: 'ARR',
+      airport: 'LOS',
+      dest: null,
+      ts: base + 12 * 3600 + 20 * 60,
+    });
+    return db;
+  }
+
+  /** A fresh (updated 30 s ago) state row: at ABV unless `atOrigin`. */
+  function insertState(
+    db: Db,
+    hex: string,
+    reg: string,
+    flt: string | null,
+    atOrigin = false,
+  ): void {
+    const coords = atOrigin ? { lat: 6.5774, lon: 3.3212 } : { lat: 9.0068, lon: 7.2632 };
+    db.prepare(`
+      INSERT INTO aircraft_state (hex, reg, flt, lat, lon, on_ground, ts, updated_at)
+      VALUES (@hex, @reg, @flt, @lat, @lon, 1, @ts, @updatedAt)
+    `).run({ hex, reg, flt, ...coords, ts: NOW_SEC - 60, updatedAt: NOW_SEC - 30 });
+  }
+
+  function onlyCandidate(db: Db) {
+    const result = forecast(db, QUERY);
+    expect(result.candidates).toHaveLength(1);
+    return result.candidates[0]!;
+  }
+
+  it('uses the fresh same-flight reg instead of the prior-day departure reg', () => {
+    const db = guardDb();
+    insertState(db, 'SWAP', '5N-NEW', FLIGHT);
+
+    const candidate = onlyCandidate(db);
+    expect(candidate.flightNo).toBe(FLIGHT);
+    expect(candidate.tail).toEqual({ reg: '5N-NEW', status: 'not_inbound', adjusted: true });
+    // 5N-NEW is still at ABV: transit plus turnaround floors the 14:40 samples.
+    expect(candidate.p50).toBeGreaterThanOrEqual(14 * 60 + 40);
+  });
+
+  it('rejects the prior reg when its fresh state carries another flight', () => {
+    const db = guardDb();
+    // At the origin, so the old code would fall through to the landed-inbound
+    // link (+70 min) rather than a live floor; the guard must block both.
+    insertState(db, 'STALEASSIGN', PRIOR_TAIL, 'P47800', true);
+
+    const candidate = onlyCandidate(db);
+    expect(candidate.flightNo).toBe(FLIGHT);
+    expect(candidate.tail).toEqual({ reg: PRIOR_TAIL, status: 'unknown', adjusted: false });
+    // No live floor and no landed-inbound +70 shift: the 14:40 band is untouched.
+    expect(candidate.p50).toBe(14 * 60 + 40);
+    expect(candidate.p10).toBe(14 * 60 + 28);
+  });
+
+  it('does not floor when several fresh regs claim the same flight number', () => {
+    const db = guardDb();
+    insertState(db, 'AMBIGA', '5N-A', FLIGHT);
+    insertState(db, 'AMBIGB', '5N-B', FLIGHT);
+
+    const candidate = onlyCandidate(db);
+    expect(candidate.flightNo).toBe(FLIGHT);
+    expect(candidate.tail).toEqual({ reg: PRIOR_TAIL, status: 'unknown', adjusted: false });
     expect(candidate.p50).toBe(14 * 60 + 40);
   });
 });

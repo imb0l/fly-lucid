@@ -174,6 +174,7 @@ export default function LiveMapPage() {
   const [health, setHealth] = useState<Health | null>(null);
   const [liveError, setLiveError] = useState<string | null>(null);
   const [basemap, setBasemap] = useState<BasemapState>('loading');
+  const [mapError, setMapError] = useState<string | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -193,14 +194,22 @@ export default function LiveMapPage() {
       }
     };
 
-    const map = new maplibregl.Map({
-      container,
-      style: plainStyle(),
-      bounds: NIGERIA_BOUNDS,
-      fitBoundsOptions: { padding: 32 },
-      attributionControl: false,
-      maxZoom: 12,
-    });
+    let map: maplibregl.Map;
+    try {
+      map = new maplibregl.Map({
+        container,
+        style: plainStyle(),
+        bounds: NIGERIA_BOUNDS,
+        fitBoundsOptions: { padding: 32 },
+        attributionControl: false,
+        maxZoom: 12,
+      });
+    } catch (err) {
+      // A missing WebGL context throws here; keep the page usable without a map.
+      setMapError(describeError(err));
+      setBasemap('plain');
+      return;
+    }
     mapRef.current = map;
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
     map.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right');
@@ -302,39 +311,77 @@ export default function LiveMapPage() {
     for (const a of aircraft) {
       if (typeof a.ts === 'number' && a.ts > newest) newest = a.ts;
     }
-    if (!newest && health?.lastPollTs && health.lastPollTs > 0) newest = health.lastPollTs;
+    if (!newest && health?.lastPollOkTs && health.lastPollOkTs > 0) newest = health.lastPollOkTs;
     return newest || null;
   }, [aircraft, health]);
 
   const airborneCount = useMemo(() => aircraft.filter((a) => !a.onGround).length, [aircraft]);
+  const hasFreshPositions = aircraft.length > 0 && !liveError;
+  const lastUpdateText = asOf ? `${fmtWatClock(asOf)} WAT` : 'unavailable';
+  const freshnessLine = hasFreshPositions
+    ? `${airborneCount} airborne · ${aircraft.length - airborneCount} on the ground · refreshed every 30 seconds`
+    : liveError
+      ? `No fresh positions — the live feed did not respond; last update ${lastUpdateText}.`
+      : `No fresh positions — the live feed returned no aircraft; last update ${lastUpdateText}.`;
 
   return (
     <section className="page">
       <div className="page-head">
         <div>
           <h1>Live aircraft over Nigeria</h1>
-          <p className="muted">
-            {airborneCount} airborne · {aircraft.length - airborneCount} on the ground · refreshed every 30 seconds
+          <p className="muted" role="status">
+            {freshnessLine}
           </p>
         </div>
-        <div className="map-stats">
+        <div className="map-stats" role="status" aria-live="polite">
           <div className="stat">
-            <span className="stat-value">{aircraft.length}</span>
+            <span className="stat-value">{hasFreshPositions ? aircraft.length : '—'}</span>
             <span className="stat-label">aircraft</span>
           </div>
-          <div className="stat stat-time">as of {asOf ? `${fmtWatClock(asOf)} WAT` : '—'}</div>
+          <div className="stat stat-time">
+            {hasFreshPositions ? `as of ${lastUpdateText}` : `last update ${lastUpdateText}`}
+          </div>
         </div>
       </div>
 
       {health?.feedStale && (
-        <p className="banner banner-warn">
+        <p className="banner banner-warn" role="alert">
           Live feed is stale — no successful update in the last three minutes, so positions may be out of date.
         </p>
       )}
-      {liveError && <p className="banner banner-error">{liveError}</p>}
+      {liveError && (
+        <p className="banner banner-error" role="alert">
+          {liveError}
+        </p>
+      )}
 
-      <div className="map-shell">
-        <div ref={containerRef} className="map" />
+      <div className="map-shell" role="region" aria-label="Live aircraft map over Nigeria">
+        {mapError ? (
+          <div
+            className="map"
+            role="alert"
+            style={{ display: 'grid', placeItems: 'center', padding: 24, textAlign: 'center' }}
+          >
+            <div>
+              <p>
+                <strong>Map unavailable</strong>
+              </p>
+              <p className="muted">
+                {hasFreshPositions
+                  ? `${aircraft.length} aircraft in the latest feed · ${airborneCount} airborne · ${aircraft.length - airborneCount} on the ground`
+                  : `No fresh positions — last update ${lastUpdateText}.`}
+              </p>
+              <p className="hint">{mapError}</p>
+            </div>
+          </div>
+        ) : (
+          <div ref={containerRef} className="map" />
+        )}
+        {basemap === 'loading' && !mapError && (
+          <div className="map-loading" role="status" aria-live="polite">
+            Loading map…
+          </div>
+        )}
         <div className="map-legend">
           <span>
             <i className="dot dot-air" /> Airborne
@@ -345,7 +392,7 @@ export default function LiveMapPage() {
         </div>
       </div>
 
-      {basemap === 'plain' && (
+      {basemap === 'plain' && !mapError && (
         <p className="hint">Basemap could not be loaded — aircraft are plotted on a plain background.</p>
       )}
     </section>

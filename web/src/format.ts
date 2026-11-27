@@ -36,6 +36,23 @@ export function fmtWatDate(dateStr: string): string {
   });
 }
 
+const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * Render an ISO timestamp in fixed WAT (UTC+1), e.g. '25 Nov, 14:06 WAT'.
+ * A null or unparseable value becomes an em dash.
+ */
+export function fmtWatTimestamp(iso: string | null): string {
+  if (!iso) return '—';
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return '—';
+  const wat = new Date(ms + WAT_OFFSET_SEC * 1000);
+  const month = MONTHS_SHORT[wat.getUTCMonth()];
+  const hour = String(wat.getUTCHours()).padStart(2, '0');
+  const minute = String(wat.getUTCMinutes()).padStart(2, '0');
+  return `${wat.getUTCDate()} ${month}, ${hour}:${minute} WAT`;
+}
+
 /** The API may give minutes-of-day or an 'HH:MM' string; accept both. */
 export function fmtMinutesOfDay(value: number | string | null | undefined): string {
   if (typeof value === 'string') return value;

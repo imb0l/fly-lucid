@@ -8,6 +8,7 @@ export interface HealthResponse {
   ok: boolean;
   lastPollTs: number | null;
   lastPollOk: boolean | null;
+  lastPollOkTs: number | null;
   feedStale: boolean;
   aircraftNow: number;
 }
@@ -91,14 +92,16 @@ export function createQueries(db: Db): ApiQueries {
   const lastPollOk = db.prepare<[], SuccessRow>(
     'SELECT max(ts) AS ts FROM poll_log WHERE ok = 1',
   );
-  const liveCount = db.prepare<[number], CountRow>(
-    'SELECT count(*) AS n FROM aircraft_state WHERE updated_at >= ?',
+  const liveCount = db.prepare<[number, number], CountRow>(
+    `SELECT count(*) AS n
+       FROM aircraft_state
+      WHERE updated_at >= ? AND ts >= ?`,
   );
-  const liveRows = db.prepare<[number], AircraftRow>(
+  const liveRows = db.prepare<[number, number], AircraftRow>(
     `SELECT hex, reg, type, flt, airline, lat, lon, alt_ft, gs_kt, hdg,
             on_ground, orig, dest, ts
        FROM aircraft_state
-      WHERE updated_at >= ?
+      WHERE updated_at >= ? AND ts >= ?
       ORDER BY hex`,
   );
   const airportRows = db.prepare<[], AirportSummary>(
@@ -126,19 +129,22 @@ export function createQueries(db: Db): ApiQueries {
       const lastSuccessfulTs = lastPollOk.get()?.ts ?? null;
       const feedStale =
         lastSuccessfulTs === null || nowSec - lastSuccessfulTs > FEED_STALE_SEC;
-      const aircraftNow = liveCount.get(nowSec - LIVE_WINDOW_SEC)?.n ?? 0;
+      const liveCutoff = nowSec - LIVE_WINDOW_SEC;
+      const aircraftNow = liveCount.get(liveCutoff, liveCutoff)?.n ?? 0;
       const lastPollOkValue = poll === undefined ? null : poll.ok === 1;
       return {
         ok: lastPollOkValue === true && !feedStale,
         lastPollTs: poll?.ts ?? null,
         lastPollOk: lastPollOkValue,
+        lastPollOkTs: lastSuccessfulTs,
         feedStale,
         aircraftNow,
       };
     },
 
     liveAircraft(nowSec: number): LiveAircraft[] {
-      return liveRows.all(nowSec - LIVE_WINDOW_SEC).map((row) => ({
+      const liveCutoff = nowSec - LIVE_WINDOW_SEC;
+      return liveRows.all(liveCutoff, liveCutoff).map((row) => ({
         hex: row.hex,
         reg: row.reg,
         type: row.type,
