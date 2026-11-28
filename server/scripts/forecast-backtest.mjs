@@ -13,7 +13,7 @@ const SPAN_MULT = Number(process.argv[3] ?? 1.25);
 const MATCH = process.argv[4] ?? 'fixed'; // 'fixed' = windowed nearest, one-to-one; 'old' = same WAT day earliest
 const MATCH_BEFORE_SEC = 6 * 3600;
 const MATCH_AFTER_SEC = 12 * 3600;
-const K = 5;
+const K = 2;
 const MIN_POOL = 100;
 const CARRIER_MIN = Number(process.env.CARRIER_MIN ?? 3); // min carrier samples before carrier median replaces pool median
 const db = new Database(path.join(ROOT, 'server/data/fly.db'), { readonly: true });
@@ -98,7 +98,7 @@ function predictLeg(t, pool, dayStart) {
     const targetGroup = [0, 6].includes(new Date((t.schedTs + 3600) * 1000).getUTCDay()) ? 'weekend' : 'weekday';
     const m = F.estimateTightForecast(hist, null, slotAtMin, targetGroup);
     const histP50 = shiftNear(m.p50, delayPred);
-    const center = 0.65 * histP50 + 0.35 * delayPred;
+    const center = 0.5 * histP50 + 0.5 * delayPred;
     const disagree = Math.abs(histP50 - delayPred);
     const halfLo = (m.p50 - m.p10) + 0.25 * disagree;
     const halfHi = (m.p90 - m.p50) + 0.40 * disagree;
@@ -175,7 +175,7 @@ if (MODE === 'board') {
     `# Departure forecast for ${DAY} (WAT), frozen before first departure`,
     '',
     `Legs: ${out.length} unique scheduled departures. Method counts: ${JSON.stringify(byMethod)}.`,
-    'Method: "blend" = 0.65 x history-model p50 + 0.35 x (schedule + shrunk flight/carrier delay); "delay-prior" = schedule + shrunk delay where history has fewer than 5 samples.',
+    'Method: "blend" = 0.5 x history-model p50 + 0.5 x (schedule + shrunk flight/carrier delay); "delay-prior" = schedule + shrunk delay where history has fewer than 5 samples.',
     'Window: blend uses history p10/p90 offsets around the blended p50; delay-prior uses carrier delay p10/p90 spread x span multiplier.',
     'Schedule time is an input to this experiment only, not a product output.',
     '',

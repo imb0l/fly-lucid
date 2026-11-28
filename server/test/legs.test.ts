@@ -123,6 +123,51 @@ describe('applySnapshot transitions', () => {
     expect(eventRows(db)).toHaveLength(0);
   });
 
+  it('recovers a null takeoff origin from the nearest seeded airport within 8 nm', () => {
+    const db = makeDb();
+    applySnapshot(
+      db,
+      [observe({ ts: 3000, orig: null, dest: 'ABV', lat: 6.595, lon: 3.34 })],
+      3000,
+    );
+
+    const counts = applySnapshot(
+      db,
+      [
+        observe({
+          ts: 3030,
+          orig: null,
+          dest: 'ABV',
+          lat: 6.595,
+          lon: 3.34,
+          onGround: false,
+          altFt: 1500,
+          gsKt: 160,
+        }),
+      ],
+      3030,
+    );
+
+    expect(counts).toEqual({ deps: 1, arrs: 0 });
+    expect(eventRows(db)).toEqual([
+      { hex: 'TEST01', kind: 'DEP', airport: 'LOS', dest: 'ABV', ts: 3030, flt: 'P47443' },
+    ]);
+  });
+
+  it('does not invent a takeoff origin when no seeded airport is within 8 nm', () => {
+    const db = makeDb();
+    applySnapshot(db, [observe({ ts: 4000, orig: null, lat: 0, lon: 0 })], 4000);
+
+    const counts = applySnapshot(
+      db,
+      [observe({ ts: 4030, orig: null, lat: 0, lon: 0, onGround: false, altFt: 900, gsKt: 140 })],
+      4030,
+    );
+
+    expect(counts).toEqual({ deps: 0, arrs: 0 });
+    expect(eventRows(db)).toHaveLength(0);
+  });
+
   it('upserts aircraft_state and prunes rows older than a day', () => {
     const db = makeDb();
     applySnapshot(db, [observe({ ts: 5000, onGround: false, flt: null })], 5000);

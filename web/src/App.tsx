@@ -1,4 +1,13 @@
+import { Suspense } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
+
+function RouteFallback() {
+  return (
+    <div className="page" role="status" aria-live="polite">
+      <p className="muted">Loading page…</p>
+    </div>
+  );
+}
 
 const navClass = ({ isActive }: { isActive: boolean }): string => (isActive ? 'nav-link active' : 'nav-link');
 
@@ -27,7 +36,9 @@ export default function App() {
         </nav>
       </header>
       <main className="app-main">
-        <Outlet />
+        <Suspense fallback={<RouteFallback />}>
+          <Outlet />
+        </Suspense>
       </main>
       <footer className="app-footer">
         Positions come from a public ADS-B feed. All times WAT (UTC+1). Forecasts are built from observed takeoffs

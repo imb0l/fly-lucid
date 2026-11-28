@@ -76,6 +76,7 @@ export interface SearchResponse {
   generatedAt: string | null;
   dataAsOf: string | null;
   feedStale: boolean;
+  modelVersion: string;
   candidates: Candidate[];
   insufficient: InsufficientFlight[];
 }

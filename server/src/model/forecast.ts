@@ -74,6 +74,7 @@ export interface ForecastCandidate {
   p50: number;
   p90: number;
   safeBy: number;
+  baseP50: number;
   tail: TailInfo;
 }
 
@@ -342,7 +343,6 @@ interface StateRow {
   gs_kt: number | null;
   on_ground: number;
   dest: string | null;
-  updated_at: number;
   flt: string | null;
 }
 
@@ -421,7 +421,7 @@ export function estimateTightForecast(
   readyFloorMin: number | null,
   atMin: number,
   preferredGroup: 'weekday' | 'weekend' | null = null,
-): { p10: number; p50: number; p90: number; score: number } {
+): { p10: number; p50: number; p90: number; score: number; n: number } {
   const byNewest = [...timestamps].sort((left, right) => right - left);
   const newestTs = byNewest[0] ?? 0;
 
@@ -550,9 +550,11 @@ export function estimateTightForecast(
           Math.min(MAX_HALF_HIGH_MIN, Math.round(HALF_HIGH_MAD_MULT * mad)),
         );
 
-  // Identical history is not zero uncertainty. Keep the minimum 12 min band;
-  // a readiness floor inferred from incomplete tail/feed data is even less
-  // certain, so a collapsed floor-derived sample gets a ±30 min epistemic band.
+  // Identical history is not zero uncertainty. Keep the minimum 12 min band.
+  // A readiness floor comes from incomplete tail/event data and can itself be
+  // wrong after a missed departure, so a collapsed floor-derived sample gets a
+  // ±30 min epistemic band; p10 may precede the inferred floor rather than
+  // treating that floor as a guaranteed physical bound.
   const rawP10 = Math.max(0, p50 - halfLow);
   const p10 =
     readyFloorMin === null || coreSpread === 0
@@ -566,7 +568,7 @@ export function estimateTightForecast(
     0,
   );
   const score = allTotalW > 0 ? hitW / allTotalW : 0;
-  return { p10, p50, p90, score };
+  return { p10, p50, p90, score, n: activeItems.length };
 }
 
 /**
@@ -606,13 +608,17 @@ function adjustForInboundTail(
   // Guard 1: a fresh state row keyed by this flight number is stronger
   // evidence than the latest departure history, which can carry yesterday's
   // tail across a same-day swap. Use it only when it names exactly one reg.
+  // Both ingest time and the aircraft's own observation `ts` must be fresh:
+  // the feed can refresh `updated_at` while reporting a position hours old.
+  const freshCutoff = input.nowSec - STATE_FRESH_SEC;
   const freshFlightRegs = db
     .prepare<{ fresh: number; flt: string }, { reg: string }>(
       `SELECT DISTINCT reg FROM aircraft_state
-        WHERE updated_at >= :fresh AND reg IS NOT NULL AND flt IS NOT NULL
+        WHERE updated_at >= :fresh AND ts >= :fresh
+          AND reg IS NOT NULL AND flt IS NOT NULL
           AND upper(trim(flt)) = upper(trim(:flt))`,
     )
-    .all({ fresh: input.nowSec - STATE_FRESH_SEC, flt: flightNo })
+    .all({ fresh: freshCutoff, flt: flightNo })
     .map((row) => row.reg);
   const distinctRegs = [...new Set(freshFlightRegs)];
   if (distinctRegs.length > 1) {
@@ -621,17 +627,40 @@ function adjustForInboundTail(
   }
   const reg = distinctRegs[0] ?? priorReg;
 
-  // Guard 2: the resolved tail's freshest state must not be flying another
-  // flight number, which proves the prior-day assignment is stale.
-  const state = db
-    .prepare<{ reg: string }, StateRow>(
-      'SELECT lat, lon, gs_kt, on_ground, dest, updated_at, flt FROM aircraft_state WHERE reg = :reg ORDER BY updated_at DESC LIMIT 1',
+  // Guard 2: the resolved tail needs fresh, unambiguous live evidence. Every
+  // fresh hex for the reg is read, not just the newest, because one swapped
+  // registration can leave two rows reporting different flight numbers.
+  const freshStates = db
+    .prepare<{ reg: string; fresh: number }, StateRow>(
+      `SELECT lat, lon, gs_kt, on_ground, dest, flt FROM aircraft_state
+        WHERE reg = :reg AND updated_at >= :fresh AND ts >= :fresh
+        ORDER BY updated_at DESC, ts DESC`,
     )
-    .get({ reg });
-  if (state === undefined || state.updated_at < input.nowSec - STATE_FRESH_SEC) {
-    return { tail: unknownTail(reg), samples, readyFloorMin: null, blocked: false };
+    .all({ reg, fresh: freshCutoff });
+  const state = freshStates[0];
+  if (state === undefined) {
+    // Missing or stale state cannot rule out a same-day tail swap, so neither
+    // the live floor nor the history tail link may use this reg.
+    return { tail: unknownTail(reg), samples, readyFloorMin: null, blocked: true };
   }
-  if (state.flt !== null && state.flt.trim().toUpperCase() !== flightNo.trim().toUpperCase()) {
+  // A null flight number says nothing about which flight this aircraft flies;
+  // it is unverified evidence, not permission to floor the prior tail.
+  if (state.flt === null) {
+    return { tail: unknownTail(reg), samples, readyFloorMin: null, blocked: true };
+  }
+  const stateFlts = new Set<string>();
+  for (const row of freshStates) {
+    if (row.flt !== null) {
+      stateFlts.add(row.flt.trim().toUpperCase());
+    }
+  }
+  if (stateFlts.size > 1) {
+    // Two fresh hexes disagree about this registration's flight: unresolved.
+    return { tail: unknownTail(reg), samples, readyFloorMin: null, blocked: true };
+  }
+  // The freshest state must be flying this flight number, which proves the
+  // prior-day assignment is stale.
+  if (state.flt.trim().toUpperCase() !== flightNo.trim().toUpperCase()) {
     return { tail: unknownTail(reg), samples, readyFloorMin: null, blocked: true };
   }
 
@@ -915,12 +944,7 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
             allTimestamps,
             rawMinutes,
           );
-    const effectiveReadyFloorMin =
-      adjusted.readyFloorMin !== null &&
-      landed?.readyFloorMin !== undefined &&
-      landed.readyFloorMin !== null
-        ? Math.max(adjusted.readyFloorMin, landed.readyFloorMin)
-        : (adjusted.readyFloorMin ?? landed?.readyFloorMin ?? null);
+    const effectiveReadyFloorMin = adjusted.readyFloorMin ?? landed?.readyFloorMin ?? null;
     const stats = estimateTightForecast(
       landed?.timestamps ?? allTimestamps,
       effectiveReadyFloorMin,
@@ -937,10 +961,10 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
     let p50 = stats.p50;
     let p90 = stats.p90;
     let safeBy = preShiftSafeBy;
-    // Observed-only prior: when no tail link explains today, the latest all-day
-    // departure still says how late this flight is currently running. Shift the
-    // band up by a quarter of that residual (capped at 45 minutes) and never let
-    // the tier change pull `safeBy` earlier than the unshifted value.
+    // Observed-only prior: when no tail link explains today, the latest
+    // departure can show how late this flight is running. Do not wrap an
+    // earlier daily slot across midnight into a large positive residual; only
+    // same-day moves within ±12 h (or a true WAT-midnight crossing) count.
     if (finalTail.adjusted === false && selectedTimestamps.length >= MIN_SAMPLES) {
       let latestTs: number | null = null;
       for (const ts of allTimestamps) {
@@ -949,7 +973,13 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
         }
       }
       if (latestTs !== null) {
-        const residual = wrapMinutes(minuteOfDayWat(latestTs) - stats.p50);
+        const latestMin = minuteOfDayWat(latestTs);
+        let residual = latestMin - stats.p50;
+        if (stats.p50 >= 1380 && latestMin <= 60) {
+          residual += 1440;
+        } else if (residual < -720 || residual > 720) {
+          residual = 0;
+        }
         const delta = Math.min(
           LATEST_RESIDUAL_CAP_MIN,
           Math.max(0, Math.round(LATEST_RESIDUAL_SLOPE * residual)),
@@ -958,8 +988,9 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
           p10 = Math.max(0, Math.min(1439, p10 + delta));
           p50 = Math.max(0, Math.min(1439, p50 + delta));
           p90 = Math.max(0, Math.min(1439, p90 + delta));
-          const shiftedSafeBy = Math.max(0, Math.min(1439, p10 - safeByDeltaFor(p50)));
-          safeBy = Math.max(preShiftSafeBy, shiftedSafeBy);
+          // Keep the pre-shift safety tier and move safeBy by the same delta.
+          // Re-tiering after the shift would make safeBy less conservative.
+          safeBy = Math.max(0, Math.min(1439, preShiftSafeBy + delta));
         }
       }
     }
@@ -968,11 +999,12 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
       flightNo,
       airline: latestAirline,
       score: stats.score,
-      n: selectedTimestamps.length,
+      n: stats.n,
       p10,
       p50,
       p90,
       safeBy,
+      baseP50: stats.p50,
       tail: finalTail,
     });
   }
@@ -981,7 +1013,7 @@ export function forecast(db: Db, input: ForecastInput): ForecastResult {
     if (right.score !== left.score) {
       return right.score - left.score;
     }
-    const distance = Math.abs(left.p50 - input.atMin) - Math.abs(right.p50 - input.atMin);
+    const distance = Math.abs(left.baseP50 - input.atMin) - Math.abs(right.baseP50 - input.atMin);
     if (distance !== 0) {
       return distance;
     }

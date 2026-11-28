@@ -177,7 +177,7 @@ describe('forecast on a seeded database', () => {
 
     const candidate = result.candidates[0]!;
     expect(candidate.flightNo).toBe(FLIGHT);
-    expect(candidate.n).toBe(groupCount);
+    expect(candidate.n).toBe(19);
     expect(candidate.n).toBeGreaterThanOrEqual(5);
     // Recency-weighted + MAD-Winsorized tight forecast anchors on the 14:40 slot
     // and trims the 19:10 outliers so the [p10, p90] window stays tight (< 60
@@ -334,8 +334,8 @@ describe('forecast on a seeded database', () => {
     expect(result.candidates).toHaveLength(1);
     const candidate = result.candidates[0]!;
     expect(candidate.flightNo).toBe('QI522');
-    // n keeps the weekday count because the weekday group has >= MIN_SAMPLES.
-    expect(candidate.n).toBe(8);
+    // n now reports the two observations actually used for the evening slot.
+    expect(candidate.n).toBe(2);
     // The evening slot wins: p50 near 17:50, never the 12:45 midday cluster.
     expect(candidate.p50).toBeGreaterThanOrEqual(17 * 60 + 40);
     expect(candidate.p50).toBeLessThanOrEqual(18 * 60);
@@ -413,18 +413,35 @@ describe('history tail link on a seeded database', () => {
     return db;
   }
 
-  it('shifts departure samples by half the inbound lateness when the aircraft has landed', () => {
-    const baseline = forecast(linkedDb(null), QUERY).candidates[0]!;
-    // Inbound lands 11:00 WAT against a 10:00 median: 60 min late, slope 0.5 -> +30 min.
-    const linked = forecast(linkedDb(11 * 60), QUERY).candidates[0]!;
+  /**
+   * A fresh live state for TAIL already back at LOS on the target flight. The
+   * guard requires fresh, self-consistent live evidence before the tail may
+   * drive either a live floor or the history link.
+   */
+  function insertOriginState(db: Db, nowSec: number): void {
+    db.prepare(`
+      INSERT INTO aircraft_state (hex, reg, flt, lat, lon, on_ground, ts, updated_at)
+      VALUES ('FRESHTAIL', @reg, @flt, 6.5774, 3.3212, 1, @ts, @updatedAt)
+    `).run({ reg: TAIL, flt: FLIGHT, ts: nowSec - 60, updatedAt: nowSec - 30 });
+  }
 
-    expect(baseline.tail).toEqual({ reg: TAIL, status: 'unknown', adjusted: false });
+  it('shifts departure samples by half the inbound lateness when the aircraft has landed', () => {
+    const baselineDb = linkedDb(null);
+    insertOriginState(baselineDb, NOW_SEC);
+    const baseline = forecast(baselineDb, QUERY).candidates[0]!;
+    // Inbound lands 11:00 WAT against a 10:00 median: 60 min late, slope 0.5 -> +30 min.
+    const linkedDbFresh = linkedDb(11 * 60);
+    insertOriginState(linkedDbFresh, NOW_SEC);
+    const linked = forecast(linkedDbFresh, QUERY).candidates[0]!;
+
+    expect(baseline.tail).toEqual({ reg: TAIL, status: 'not_inbound', adjusted: false });
     expect(linked.tail).toEqual({ reg: TAIL, status: 'landed_inbound', adjusted: true });
     expect(linked.p50 - baseline.p50).toBe(30);
   });
 
   it('does not link when the aircraft departed again after landing', () => {
     const db = linkedDb(11 * 60);
+    insertOriginState(db, NOW_SEC);
     db.prepare(`
       INSERT INTO events (hex, reg, flt, airline, kind, airport, dest, ts)
       VALUES ('TODAYOUT', @reg, @flt, 'APO', 'DEP', 'LOS', 'ABV', @ts)
@@ -434,13 +451,17 @@ describe('history tail link on a seeded database', () => {
       ts: watsMidnightUtc(TODAY) + 12 * 3600 + 30 * 60,
     });
     const candidate = forecast(db, QUERY).candidates.find((c) => c.flightNo === FLIGHT)!;
-    expect(candidate.tail).toEqual({ reg: TAIL, status: 'unknown', adjusted: false });
+    expect(candidate.tail).toEqual({ reg: TAIL, status: 'not_inbound', adjusted: false });
+    // The 11:00 inbound would have shifted the 14:40 band by +30.
+    expect(candidate.p50).toBe(14 * 60 + 40);
   });
 
   it('floors an ad-hoc inbound arrival at the physical turnaround time', () => {
     const db = linkedDb(null);
     const base = watsMidnightUtc(TODAY);
     const arrivalSec = base + (14 * 60 + 20) * 60;
+    const queryNow = arrivalSec + 10 * 60;
+    insertOriginState(db, queryNow);
     // Ad-hoc inbound flight number with no prior arrivals at LOS: there is no
     // lateness history, but the aircraft has physically landed at 14:20.
     db.prepare(`
@@ -449,7 +470,7 @@ describe('history tail link on a seeded database', () => {
     `).run({ reg: TAIL, ts: arrivalSec });
 
     // The arrival must already be observed for the tail link to apply.
-    const candidate = forecast(db, { ...QUERY, nowSec: arrivalSec + 10 * 60 }).candidates[0]!;
+    const candidate = forecast(db, { ...QUERY, nowSec: queryNow }).candidates[0]!;
 
     expect(candidate.flightNo).toBe(FLIGHT);
     expect(candidate.tail).toEqual({ reg: TAIL, status: 'landed_inbound', adjusted: true });
@@ -575,9 +596,20 @@ describe('observed-only latest residual prior', () => {
 
     expect(candidate.p50).toBe(13 * 60 + 50 + 18); // 848: the late tier (58)
     expect(candidate.p10).toBe(13 * 60 + 56);
-    // Pre-shift safeBy was 818 - 13 = 805; the shifted tier alone would give
-    // 836 - 58 = 778, so the unshifted floor must win.
-    expect(candidate.safeBy).toBe(13 * 60 + 25);
+    // Pre-shift safeBy was 818 - 13 = 805; the same +18 shift preserves the
+    // pre-shift safety tier instead of re-tiering to the less-conservative 58.
+    expect(candidate.safeBy).toBe(13 * 60 + 43);
+  });
+
+  it('does not wrap an earlier daily slot into a positive residual', () => {
+    // Eight 21:00 departures plus the newest observation from the 07:00 slot.
+    // The 14-hour gap is another slot, not a 6-hour delay of the 21:00 flight.
+    const candidate = topCandidate(residualDb(21 * 60, 7 * 60), 21 * 60);
+
+    expect(candidate.p10).toBe(21 * 60 - 12);
+    expect(candidate.p50).toBe(21 * 60);
+    expect(candidate.p90).toBe(21 * 60 + 12);
+    expect(candidate.safeBy).toBe(21 * 60 - 70);
   });
 });
 
@@ -701,6 +733,49 @@ describe('fresh aircraft_state tail guard', () => {
 
     const candidate = onlyCandidate(db);
     expect(candidate.flightNo).toBe(FLIGHT);
+    expect(candidate.tail).toEqual({ reg: PRIOR_TAIL, status: 'unknown', adjusted: false });
+    expect(candidate.p50).toBe(14 * 60 + 40);
+  });
+
+  it('blocks a fresh prior-tail state with a null flight number', () => {
+    const db = guardDb();
+    insertState(db, 'NULLFLT', PRIOR_TAIL, null, true);
+
+    const candidate = onlyCandidate(db);
+    expect(candidate.tail).toEqual({ reg: PRIOR_TAIL, status: 'unknown', adjusted: false });
+    expect(candidate.p50).toBe(14 * 60 + 40);
+  });
+
+  it('blocks the landed link when the prior-tail state is 129 seconds old', () => {
+    const db = guardDb();
+    db.prepare(`
+      INSERT INTO aircraft_state (hex, reg, flt, lat, lon, on_ground, ts, updated_at)
+      VALUES ('STALE129', @reg, @flt, 6.5774, 3.3212, 1, @ts, @updatedAt)
+    `).run({ reg: PRIOR_TAIL, flt: FLIGHT, ts: NOW_SEC - 129, updatedAt: NOW_SEC - 129 });
+
+    const candidate = onlyCandidate(db);
+    expect(candidate.tail).toEqual({ reg: PRIOR_TAIL, status: 'unknown', adjusted: false });
+    expect(candidate.p50).toBe(14 * 60 + 40);
+  });
+
+  it('blocks conflicting fresh states for the same registration', () => {
+    const db = guardDb();
+    insertState(db, 'CONFLICT-A', PRIOR_TAIL, FLIGHT, true);
+    insertState(db, 'CONFLICT-B', PRIOR_TAIL, 'P47800', true);
+
+    const candidate = onlyCandidate(db);
+    expect(candidate.tail).toEqual({ reg: PRIOR_TAIL, status: 'unknown', adjusted: false });
+    expect(candidate.p50).toBe(14 * 60 + 40);
+  });
+
+  it('blocks a freshly written row whose aircraft observation is stale', () => {
+    const db = guardDb();
+    db.prepare(`
+      INSERT INTO aircraft_state (hex, reg, flt, lat, lon, on_ground, ts, updated_at)
+      VALUES ('OLDTS', @reg, @flt, 9.0068, 7.2632, 1, @ts, @updatedAt)
+    `).run({ reg: PRIOR_TAIL, flt: FLIGHT, ts: NOW_SEC - 300, updatedAt: NOW_SEC - 30 });
+
+    const candidate = onlyCandidate(db);
     expect(candidate.tail).toEqual({ reg: PRIOR_TAIL, status: 'unknown', adjusted: false });
     expect(candidate.p50).toBe(14 * 60 + 40);
   });

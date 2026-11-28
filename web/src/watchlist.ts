@@ -13,6 +13,7 @@ const AT_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 const SAVE_FAILED = 'Changes could not be saved — browser storage is blocked or full.';
 const READ_FAILED = 'The saved watchlist could not be read — browser storage is unavailable.';
+const CORRUPT_READ = 'The saved watchlist was unreadable, so it was not changed.';
 
 let lastStorageError: string | null = null;
 
@@ -115,6 +116,7 @@ function readItems(): WatchItem[] {
     const parsed: unknown = JSON.parse(raw);
     return Array.isArray(parsed) ? clean(parsed) : [];
   } catch {
+    lastStorageError = CORRUPT_READ;
     return [];
   }
 }
@@ -158,7 +160,7 @@ export function removePastWatchItems(items: WatchItem[], today: string): WatchIt
 export function addWatchItem(item: WatchItem): WatchItem[] {
   const items = readItems();
   // Never overwrite a list we could not read back.
-  if (lastStorageError === READ_FAILED) return items;
+  if (lastStorageError !== null) return items;
   if (!isWatchItem(item)) return items;
   const normalized = normalize(item);
   const key = watchKey(normalized);
@@ -172,7 +174,7 @@ export function removeWatchItem(item: WatchItem): WatchItem[] {
   const key = watchKey(normalize(item));
   const items = readItems();
   // Never overwrite a list we could not read back.
-  if (lastStorageError === READ_FAILED) return items;
+  if (lastStorageError !== null) return items;
   const next = items.filter((existing) => watchKey(existing) !== key);
   persist(next);
   return next;

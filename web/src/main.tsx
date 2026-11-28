@@ -1,13 +1,16 @@
-import React from 'react';
+import React, { lazy } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import App from './App';
-import LiveMapPage from './pages/LiveMapPage';
-import FindPage from './pages/FindPage';
-import FlightPage from './pages/FlightPage';
-import WatchPage from './pages/WatchPage';
 import NotFound from './pages/NotFound';
 import './styles.css';
+
+// Route-level code splitting: the MapLibre map (the heaviest dependency) lives only
+// in the LiveMapPage chunk, so Find/Flight/Watch never download it.
+const LiveMapPage = lazy(() => import('./pages/LiveMapPage'));
+const FindPage = lazy(() => import('./pages/FindPage'));
+const FlightPage = lazy(() => import('./pages/FlightPage'));
+const WatchPage = lazy(() => import('./pages/WatchPage'));
 
 const router = createBrowserRouter([
   {

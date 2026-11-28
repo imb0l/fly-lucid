@@ -7,7 +7,11 @@ import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { AIRLINES } from '../data/airlines.js';
-import type { Db } from '../db/db.js';
+import {
+  FORECAST_MODEL_VERSION,
+  createForecastLogger,
+  type Db,
+} from '../db/db.js';
 import {
   FEED_STALE_SEC,
   LOOKBACK_DAYS,
@@ -70,6 +74,7 @@ export interface SearchResponse {
   generatedAt: string;
   dataAsOf: string | null;
   feedStale: boolean;
+  modelVersion: string;
   candidates: SearchCandidate[];
   insufficient: { flightNo: string; n: number }[];
 }
@@ -145,11 +150,14 @@ function resolveWebDist(explicit: string | undefined): string {
 
 /**
  * Build the HTTP API without listening, so tests can use `app.inject`.
- * Every route is read-only; the poller owns all writes.
+ * Routes are read-only except `/api/search`, which appends one point-in-time
+ * `forecast_log` audit row per returned candidate. The poller still owns
+ * `events` and `aircraft_state`.
  */
 export function buildApp(db: Db, options: BuildAppOptions = {}): FastifyInstance {
   const now = options.now ?? (() => Math.floor(Date.now() / 1000));
   const queries = createQueries(db);
+  const forecastLog = createForecastLogger(db);
   const app = Fastify({ logger: options.logger ?? false });
 
   const webDist = resolveWebDist(options.webDist ?? process.env.WEB_DIST);
@@ -252,6 +260,7 @@ export function buildApp(db: Db, options: BuildAppOptions = {}): FastifyInstance
           ? null
           : new Date(lastPollOkTs * 1000).toISOString(),
       feedStale,
+      modelVersion: FORECAST_MODEL_VERSION,
       candidates: result.candidates.map((candidate) => {
         const airline = candidate.airline;
         const info = airline === null ? undefined : AIRLINES[airline];
@@ -278,6 +287,38 @@ export function buildApp(db: Db, options: BuildAppOptions = {}): FastifyInstance
         n: entry.n,
       })),
     };
+
+    // Append-only audit trail: the raw forecast as issued, keyed by the second
+    // it was issued in so a repeated request cannot duplicate it.
+    const targetTs = dayNumber * DAY_SEC - 3600 + atMin * 60;
+    const eventMaxId = forecastLog.eventMaxId();
+    const horizonMin = Math.round((targetTs - nowSec) / 60);
+    for (const candidate of result.candidates) {
+      forecastLog.insert({
+        forecastKey: `${nowSec}|${origin}|${dest}|${dateWat}|${at}|${candidate.flightNo}|${FORECAST_MODEL_VERSION}`,
+        issuedAt: nowSec,
+        targetTs,
+        targetDate: dateWat,
+        horizonMin,
+        flt: candidate.flightNo,
+        airline: candidate.airline,
+        origin,
+        dest,
+        atMin,
+        p10: candidate.p10,
+        p50: candidate.p50,
+        p90: candidate.p90,
+        safeBy: candidate.safeBy,
+        n: candidate.n,
+        score: candidate.score,
+        tailReg: candidate.tail.reg,
+        tailStatus: candidate.tail.status,
+        tailAdjusted: candidate.tail.adjusted,
+        feedStale,
+        eventMaxId,
+        createdAt: nowSec,
+      });
+    }
 
     return reply.send(body);
   });

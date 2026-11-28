@@ -15,8 +15,8 @@ export const STATE_TTL_SEC = 86_400;
 /** Maximum age of an open DEP event eligible for late callsign/destination backfill. */
 export const BACKFILL_DEP_WINDOW_SEC = 4 * 3600;
 
-/** Maximum distance (nm) to match a touchdown with no feed destination to a seeded airport. */
-const TOUCHDOWN_AIRPORT_MAX_NM = 8;
+/** Maximum distance (nm) to match a null takeoff origin or touchdown destination to a seeded airport. */
+const AIRPORT_MATCH_MAX_NM = 8;
 const EARTH_RADIUS_NM = 3440.065;
 
 function haversineNm(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -87,7 +87,7 @@ export function applySnapshot(db: Db, aircraft: Aircraft[], nowSec: number): Sna
 
   function nearestSeededAirport(lat: number, lon: number): string | null {
     let bestIata: string | null = null;
-    let bestNm = TOUCHDOWN_AIRPORT_MAX_NM;
+    let bestNm = AIRPORT_MATCH_MAX_NM;
     for (const ap of seededAirports) {
       const nm = haversineNm(lat, lon, ap.lat, ap.lon);
       if (nm <= bestNm) {
@@ -176,8 +176,13 @@ export function applySnapshot(db: Db, aircraft: Aircraft[], nowSec: number): Sna
       }
 
       if (prev.on_ground === 1 && !cur.onGround) {
+        // A null origin is recoverable from the takeoff position: the first
+        // airborne frame is still within a few miles of the departure airport.
+        // An explicit but invalid code is left alone rather than relabelled.
         const depOrigin = cur.orig ?? prev.orig;
-        if (depOrigin !== null && airportExists.get(depOrigin) !== undefined) {
+        const resolvedOrigin =
+          depOrigin === null ? nearestSeededAirport(cur.lat, cur.lon) : depOrigin;
+        if (resolvedOrigin !== null && airportExists.get(resolvedOrigin) !== undefined) {
           const depDest = cur.dest ?? prev.dest;
           const validDest =
             depDest !== null && airportExists.get(depDest) !== undefined ? depDest : null;
@@ -187,7 +192,7 @@ export function applySnapshot(db: Db, aircraft: Aircraft[], nowSec: number): Sna
             flt: cur.flt ?? prev.flt,
             airline: cur.airline ?? prev.airline,
             kind: 'DEP',
-            airport: depOrigin,
+            airport: resolvedOrigin,
             dest: validDest,
             ts: cur.ts,
           }).changes;

@@ -26,6 +26,94 @@ function addColumnIfMissing(db: Db, table: string, column: string, type: string)
   }
 }
 
+/** Model version stamped on every `/api/search` audit row. */
+export const FORECAST_MODEL_VERSION = 'live-v3-2026-11-28';
+
+/** One point-in-time forecast exactly as issued, before any calibration. */
+export interface ForecastLogRow {
+  forecastKey: string;
+  issuedAt: number;
+  targetTs: number;
+  targetDate: string;
+  horizonMin: number;
+  flt: string;
+  airline: string | null;
+  origin: string;
+  dest: string;
+  atMin: number;
+  p10: number | null;
+  p50: number | null;
+  p90: number | null;
+  safeBy: number | null;
+  n: number | null;
+  score: number | null;
+  tailReg: string | null;
+  tailStatus: string | null;
+  tailAdjusted: boolean;
+  feedStale: boolean;
+  eventMaxId: number | null;
+  createdAt: number;
+}
+
+export interface ForecastLogger {
+  /** `max(events.id)` now: the point-in-time cutoff for a request. */
+  eventMaxId(): number | null;
+  /** Append one audit row; a repeat of the same `forecastKey` is ignored. */
+  insert(row: ForecastLogRow): void;
+}
+
+/**
+ * Append-only forecast audit log. Rows are immutable point-in-time records:
+ * `INSERT OR IGNORE` keeps a repeated request in the same second from
+ * duplicating, and never overwrites what was issued earlier.
+ */
+export function createForecastLogger(db: Db): ForecastLogger {
+  const maxEventId = db.prepare<[], { id: number | null }>(
+    'SELECT max(id) AS id FROM events',
+  );
+  const insertRow = db.prepare(
+    `INSERT OR IGNORE INTO forecast_log (
+       forecast_key, issued_at, target_ts, target_date, horizon_min, flt,
+       airline, origin, dest, at_min, p10, p50, p90, safe_by, n, score,
+       tail_reg, tail_status, tail_adjusted, feed_stale, event_max_id,
+       model_version, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+
+  return {
+    eventMaxId(): number | null {
+      return maxEventId.get()?.id ?? null;
+    },
+    insert(row: ForecastLogRow): void {
+      insertRow.run(
+        row.forecastKey,
+        row.issuedAt,
+        row.targetTs,
+        row.targetDate,
+        row.horizonMin,
+        row.flt,
+        row.airline,
+        row.origin,
+        row.dest,
+        row.atMin,
+        row.p10,
+        row.p50,
+        row.p90,
+        row.safeBy,
+        row.n,
+        row.score,
+        row.tailReg,
+        row.tailStatus,
+        row.tailAdjusted ? 1 : 0,
+        row.feedStale ? 1 : 0,
+        row.eventMaxId,
+        FORECAST_MODEL_VERSION,
+        row.createdAt,
+      );
+    },
+  };
+}
+
 export function openDb(dbPath: string): Db {
   if (dbPath !== ':memory:') {
     const dir = path.dirname(dbPath);
@@ -38,6 +126,9 @@ export function openDb(dbPath: string): Db {
   db.pragma('busy_timeout = 5000');
   db.pragma('foreign_keys = ON');
 
+  // Every statement in schema.sql is idempotent (`CREATE ... IF NOT EXISTS`),
+  // so running it against an existing database is the guarded migration path
+  // for new tables and indexes (including `forecast_log`/`forecast_outcome`).
   const schemaSql = fs.readFileSync(resolveSchemaPath(), 'utf8');
   db.exec(schemaSql);
   addColumnIfMissing(db, 'events', 'sched_ts', 'INTEGER');

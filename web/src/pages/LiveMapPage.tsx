@@ -89,8 +89,12 @@ function toCollection(aircraft: Aircraft[]): SourceData {
   return { type: 'FeatureCollection', features } as unknown as SourceData;
 }
 
-/** North-pointing arrow; MapLibre rotates icons clockwise by `icon-rotate`. */
-function planeIcon(color: string): ImageData | null {
+/**
+ * Draws the aircraft marker. Airborne aircraft get a north-pointing arrow (MapLibre
+ * rotates it clockwise by `icon-rotate`); aircraft on the ground get a circle, so the
+ * airborne/ground distinction survives without relying on colour.
+ */
+function aircraftIcon(color: string, variant: 'airborne' | 'ground'): ImageData | null {
   const size = 48;
   const canvas = document.createElement('canvas');
   canvas.width = size;
@@ -103,11 +107,16 @@ function planeIcon(color: string): ImageData | null {
   ctx.lineWidth = 2;
   ctx.lineJoin = 'round';
   ctx.beginPath();
-  ctx.moveTo(0, -19);
-  ctx.lineTo(9, 12);
-  ctx.lineTo(0, 6);
-  ctx.lineTo(-9, 12);
-  ctx.closePath();
+  if (variant === 'airborne') {
+    ctx.moveTo(0, -19);
+    ctx.lineTo(9, 12);
+    ctx.lineTo(0, 6);
+    ctx.lineTo(-9, 12);
+    ctx.closePath();
+  } else {
+    ctx.arc(0, 0, 9, 0, Math.PI * 2);
+    ctx.closePath();
+  }
   ctx.fill();
   ctx.stroke();
   return ctx.getImageData(0, 0, size, size);
@@ -121,25 +130,12 @@ function installAircraftLayers(map: maplibregl.Map): void {
     map.addSource(SOURCE_ID, { type: 'geojson', data: toCollection([]) });
   }
   if (!map.hasImage(ICON_AIRBORNE)) {
-    const image = planeIcon(AIRBORNE_COLOR);
+    const image = aircraftIcon(AIRBORNE_COLOR, 'airborne');
     if (image) map.addImage(ICON_AIRBORNE, image);
   }
   if (!map.hasImage(ICON_GROUND)) {
-    const image = planeIcon(GROUND_COLOR);
+    const image = aircraftIcon(GROUND_COLOR, 'ground');
     if (image) map.addImage(ICON_GROUND, image);
-  }
-  if (!map.getLayer('aircraft-dot')) {
-    map.addLayer({
-      id: 'aircraft-dot',
-      type: 'circle',
-      source: SOURCE_ID,
-      paint: {
-        'circle-color': ['case', ['get', 'onGround'], GROUND_COLOR, AIRBORNE_COLOR],
-        'circle-radius': ['case', ['get', 'onGround'], 3, 4],
-        'circle-stroke-color': '#ffffff',
-        'circle-stroke-width': 1,
-      },
-    });
   }
   if (!map.getLayer('aircraft-arrow')) {
     map.addLayer({
@@ -148,7 +144,7 @@ function installAircraftLayers(map: maplibregl.Map): void {
       source: SOURCE_ID,
       layout: {
         'icon-image': ['case', ['get', 'onGround'], ICON_GROUND, ICON_AIRBORNE],
-        'icon-size': ['case', ['get', 'onGround'], 0.32, 0.42],
+        'icon-size': ['case', ['get', 'onGround'], 0.4, 0.42],
         'icon-rotate': ['get', 'hdg'],
         'icon-rotation-alignment': 'map',
         'icon-pitch-alignment': 'map',
@@ -384,10 +380,22 @@ export default function LiveMapPage() {
         )}
         <div className="map-legend">
           <span>
-            <i className="dot dot-air" /> Airborne
+            <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path
+                d="M8 1.5 13.5 14 8 10.8 2.5 14Z"
+                fill={AIRBORNE_COLOR}
+                stroke="#ffffff"
+                strokeWidth="1"
+                strokeLinejoin="round"
+              />
+            </svg>
+            Airborne — arrow
           </span>
           <span>
-            <i className="dot dot-ground" /> On ground
+            <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <circle cx="8" cy="8" r="5.5" fill={GROUND_COLOR} stroke="#ffffff" strokeWidth="1" />
+            </svg>
+            On ground — circle
           </span>
         </div>
       </div>

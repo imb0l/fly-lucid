@@ -33,17 +33,23 @@ for (const line of fs.readFileSync(boardPath, 'utf8').split('\n')) {
   legs.push({ sched, flt, orig, dest, carrier, p50, win, method, n: Number(n), schedTs: tsOf(sched) });
 }
 
-const CSV_HEADER = 'horizon_min,captured_at_ts,sched_wat,flt,orig,dest,carrier,status,p50,p10,p90,n,score,tail_reg,tail_status,tail_adjusted,feed_stale,safe_by';
+const CSV_HEADER = 'horizon_min,captured_at_ts,sched_wat,flt,orig,dest,carrier,status,p50,p10,p90,n,score,tail_reg,tail_status,tail_adjusted,feed_stale,safe_by,model_version';
 const captured = new Map(); // key: `${h}|${flt}|${orig}|${dest}|${sched}` -> row object
 
 if (fs.existsSync(csvPath)) {
+  const raw = fs.readFileSync(csvPath, 'utf8');
+  const rawLines = raw.trim().split('\n');
+  if (!rawLines[0]?.endsWith(',model_version')) {
+    const migrated = [CSV_HEADER, ...rawLines.slice(1).filter(Boolean).map((line) => `${line},unknown`)];
+    fs.writeFileSync(csvPath, migrated.join('\n') + '\n');
+  }
   const lines = fs.readFileSync(csvPath, 'utf8').trim().split('\n').slice(1);
   for (const line of lines) {
     if (!line.trim()) continue;
-    const [h, capTs, sched, flt, orig, dest, carrier, status, p50, p10, p90, n, score, tReg, tStat, tAdj, stale, safeBy = ''] = line.split(',');
+    const [h, capTs, sched, flt, orig, dest, carrier, status, p50, p10, p90, n, score, tReg, tStat, tAdj, stale, safeBy = '', modelVersion = 'unknown'] = line.split(',');
     captured.set(`${h}|${flt}|${orig}|${dest}|${sched}`, {
       horizonMin: Number(h), capturedAtTs: Number(capTs), sched, flt, orig, dest, carrier,
-      status, p50, p10, p90, n: Number(n), score, tReg, tStat, tAdj, stale,
+      status, p50, p10, p90, n: Number(n), score, tReg, tStat, tAdj, stale, safeBy, modelVersion,
     });
   }
 } else {
@@ -98,17 +104,17 @@ async function pollTick() {
           ? {
               horizonMin: h, capturedAtTs: nowSec, sched: b.sched, flt: b.flt, orig: b.orig, dest: b.dest, carrier: b.carrier,
               status: 'candidate', p50: cand.p50, p10: cand.p10, p90: cand.p90, n: cand.n, score: cand.score,
-              tReg: cand.tail?.reg ?? '', tStat: cand.tail?.status ?? '', tAdj: String(Boolean(cand.tail?.adjusted)), stale: String(Boolean(body.feedStale)), safeBy: cand.safeBy ?? '',
+              tReg: cand.tail?.reg ?? '', tStat: cand.tail?.status ?? '', tAdj: String(Boolean(cand.tail?.adjusted)), stale: String(Boolean(body.feedStale)), safeBy: cand.safeBy ?? '', modelVersion: body.modelVersion ?? 'unknown',
             }
           : {
               horizonMin: h, capturedAtTs: nowSec, sched: b.sched, flt: b.flt, orig: b.orig, dest: b.dest, carrier: b.carrier,
               status: ins ? 'insufficient' : 'absent', p50: '', p10: '', p90: '', n: ins?.n ?? 0, score: '',
-              tReg: '', tStat: '', tAdj: '', stale: String(Boolean(body.feedStale)), safeBy: '',
+              tReg: '', tStat: '', tAdj: '', stale: String(Boolean(body.feedStale)), safeBy: '', modelVersion: body.modelVersion ?? 'unknown',
             };
         captured.set(k, row);
         const csvLine = [
           row.horizonMin, row.capturedAtTs, row.sched, row.flt, row.orig, row.dest, row.carrier,
-          row.status, row.p50, row.p10, row.p90, row.n, row.score, row.tReg, row.tStat, row.tAdj, row.stale, row.safeBy,
+          row.status, row.p50, row.p10, row.p90, row.n, row.score, row.tReg, row.tStat, row.tAdj, row.stale, row.safeBy, row.modelVersion,
         ].join(',');
         fs.appendFileSync(csvPath, csvLine + '\n');
         newCount++;

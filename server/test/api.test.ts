@@ -253,6 +253,7 @@ describe('GET /api/search', () => {
       generatedAt: new Date(NOW_SEC * 1000).toISOString(),
       dataAsOf: new Date((NOW_SEC - 20) * 1000).toISOString(),
       feedStale: false,
+      modelVersion: 'live-v3-2026-11-28',
     });
     expect(body.candidates).toEqual([
       {
@@ -430,6 +431,80 @@ describe('static hosting', () => {
       error: 'not_found',
       message: 'web build not found',
     });
+    await app.close();
+  });
+});
+
+describe('GET /api/search forecast audit log', () => {
+  const SEARCH_URL = '/api/search?origin=LOS&dest=ABV&date=2026-05-14&at=14:00';
+
+  function forecastRows(db: Db): Record<string, unknown>[] {
+    return db.prepare('SELECT * FROM forecast_log ORDER BY id').all() as Record<string, unknown>[];
+  }
+
+  it('appends one point-in-time row per returned candidate', async () => {
+    const db = seedDb();
+    seedDepartures(db);
+    const app = makeApp(db);
+
+    const response = await app.inject({ method: 'GET', url: SEARCH_URL });
+    expect(response.statusCode).toBe(200);
+
+    const rows = forecastRows(db);
+    // P47001 has only two samples, so it is insufficient and never logged.
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      forecast_key: `${NOW_SEC}|LOS|ABV|2026-05-14|14:00|P47443|live-v3-2026-11-28`,
+      issued_at: NOW_SEC,
+      created_at: NOW_SEC,
+      target_ts: watTs('2026-05-14', 14 * 60),
+      target_date: '2026-05-14',
+      horizon_min: 1500,
+      flt: 'P47443',
+      airline: 'APO',
+      origin: 'LOS',
+      dest: 'ABV',
+      at_min: 14 * 60,
+      p10: 14 * 60 + 28,
+      p50: 14 * 60 + 40,
+      p90: 14 * 60 + 52,
+      safe_by: 13 * 60 + 30,
+      n: 5,
+      score: 1,
+      tail_reg: '5N-LATEST',
+      tail_status: 'unknown',
+      tail_adjusted: 0,
+      feed_stale: 0,
+      event_max_id: 7,
+      model_version: 'live-v3-2026-11-28',
+    });
+    await app.close();
+  });
+
+  it('does not duplicate a repeated request issued in the same second', async () => {
+    const db = seedDb();
+    seedDepartures(db);
+    const app = makeApp(db);
+
+    await app.inject({ method: 'GET', url: SEARCH_URL });
+    await app.inject({ method: 'GET', url: SEARCH_URL });
+
+    expect(forecastRows(db)).toHaveLength(1);
+    await app.close();
+  });
+
+  it('logs nothing when every flight is insufficient', async () => {
+    const db = seedDb();
+    db.prepare(
+      `INSERT INTO events (hex, reg, flt, airline, kind, airport, dest, ts)
+       VALUES ('CC0', '5N-ONE', 'P47002', 'APO', 'DEP', 'LOS', 'ABV', ?)`,
+    ).run(watTs('2026-05-12', 9 * 60));
+    const app = makeApp(db);
+
+    const response = await app.inject({ method: 'GET', url: SEARCH_URL });
+    expect(response.statusCode).toBe(200);
+    expect((response.json() as { candidates: unknown[] }).candidates).toEqual([]);
+    expect(forecastRows(db)).toEqual([]);
     await app.close();
   });
 });

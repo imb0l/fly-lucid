@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { describeError, getJson, type Airport, type Candidate, type SearchResponse } from '../api';
-import { addWatchItem, loadWatchlist, watchKey } from '../watchlist';
+import { addWatchItem, getWatchlistStorageError, loadWatchlist, watchKey } from '../watchlist';
 import { addDaysWat, fmtMinutesOfDay, fmtPercent, fmtWatDate, fmtWatTimestamp, todayWat } from '../format';
 
 const TAIL_LABELS: Record<string, string> = {
@@ -26,6 +26,7 @@ export default function FindPage() {
   const [result, setResult] = useState<SearchResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [storageError, setStorageError] = useState<string | null>(null);
   const [savedKeys, setSavedKeys] = useState<string[]>([]);
 
   useEffect(() => {
@@ -69,6 +70,7 @@ export default function FindPage() {
       flightNo: candidate.flightNo,
     };
     addWatchItem(item);
+    setStorageError(getWatchlistStorageError());
     setSavedKeys(loadWatchlist().map(watchKey));
   }
 
@@ -175,6 +177,12 @@ export default function FindPage() {
 
       <p className="disclaimer">{DISCLAIMER}</p>
 
+      {storageError && (
+        <p className="banner banner-error" role="alert">
+          {storageError}
+        </p>
+      )}
+
       <div aria-live="polite">
         {result && (
           <section className="card">
@@ -218,8 +226,8 @@ export default function FindPage() {
                 aria-label="Forecast results table, scrollable"
               >
               <p className="hint">
-                Takeoff estimates, not boarding times. About 1 in 20 similar flights left earlier than the conservative
-                takeoff time.
+                Takeoff estimates, not boarding times. The “Likely departed by” time is deliberately earlier than the likely
+                window.
               </p>
               <table className="results">
                 <thead>

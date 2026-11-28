@@ -20,6 +20,7 @@ interface RowState {
   p90?: string;
   tailStatus?: string;
   adjusted?: boolean;
+  feedStale?: boolean;
   message?: string;
 }
 
@@ -39,16 +40,22 @@ export default function WatchPage() {
   const [rows, setRows] = useState<Record<string, RowState>>({});
   const [tick, setTick] = useState(0);
   const [checkedAt, setCheckedAt] = useState<number | null>(null);
+  const [checkFailed, setCheckFailed] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
   // Mirror rows so an items change (e.g. a removal) can skip refetching rows
   // that already have data instead of reloading the whole watchlist.
   const rowsRef = useRef<Record<string, RowState>>({});
+  const itemsRef = useRef<WatchItem[]>(items);
   const loadedTickRef = useRef(-1);
 
   useEffect(() => {
     rowsRef.current = rows;
   }, [rows]);
+
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
 
   useEffect(() => {
     if (items.length === 0) {
@@ -75,7 +82,7 @@ export default function WatchPage() {
 
     let cancelled = false;
     const controller = new AbortController();
-    setRefreshing(true);
+    setCheckFailed(false);
     // Keep previously fetched rows on screen while the refresh is in flight.
     setRows((previous) => {
       let changed = false;
@@ -107,7 +114,16 @@ export default function WatchPage() {
             const data = await getJson<SearchResponse>(`/api/search?${query.toString()}`, controller.signal);
             const candidate = data.candidates.find((c) => c.flightNo === item.flightNo);
             if (!candidate) {
-              return [key, { status: 'missing', message: 'Not in the current forecast — too few observations.' }];
+              const insufficient = data.insufficient.find((entry) => entry.flightNo === item.flightNo);
+              return [
+                key,
+                insufficient
+                  ? {
+                      status: 'missing',
+                      message: `Only ${insufficient.n} observed departure${insufficient.n === 1 ? '' : 's'} in 28 days.`,
+                    }
+                  : { status: 'missing', message: 'Not in the current forecast.' },
+              ];
             }
             return [
               key,
@@ -120,6 +136,7 @@ export default function WatchPage() {
                 p90: candidate.p90,
                 tailStatus: candidate.tail.status,
                 adjusted: candidate.tail.adjusted,
+                feedStale: data.feedStale,
               },
             ];
           } catch (err) {
@@ -132,14 +149,21 @@ export default function WatchPage() {
       const results: Record<string, RowState> = {};
       for (const [key, state] of fresh) results[key] = state;
       setRows((previous) => {
-        const merged: Record<string, RowState> = {};
-        for (const item of items) {
+        const currentItems = itemsRef.current;
+        const currentKeys = new Set(currentItems.map(watchKey));
+        const merged: Record<string, RowState> = { ...previous };
+        for (const item of currentItems) {
           const key = watchKey(item);
           merged[key] = results[key] ?? previous[key] ?? { status: 'loading' as const };
         }
+        for (const key of Object.keys(merged)) {
+          if (!currentKeys.has(key)) delete merged[key];
+        }
         return merged;
       });
-      setCheckedAt(Date.now() / 1000);
+      const anyOk = fresh.some(([, state]) => state.status === 'ok');
+      setCheckedAt(anyOk ? Date.now() / 1000 : null);
+      setCheckFailed(!anyOk);
       setRefreshing(false);
     };
 
@@ -210,7 +234,11 @@ export default function WatchPage() {
               Updating…
             </span>
           )}
-          {checkedAt && <span className="muted small">Checked at {fmtWatClock(checkedAt)} WAT</span>}
+          {checkFailed ? (
+            <span className="muted small" role="alert">Check failed</span>
+          ) : checkedAt ? (
+            <span className="muted small">Checked at {fmtWatClock(checkedAt)} WAT</span>
+          ) : null}
           {pastItems.length > 0 && (
             <button type="button" className="btn" onClick={onRemovePast}>
               Remove past dates ({pastItems.length})
@@ -288,6 +316,9 @@ export default function WatchPage() {
                             </div>
                             {row.p50 !== undefined && (
                               <div className="muted small">median {fmtMinutesOfDay(row.p50)}</div>
+                            )}
+                            {row.feedStale && (
+                              <div className="muted small">Live feed stale — tail status unavailable; window uses 28-day history.</div>
                             )}
                           </>
                         ) : (

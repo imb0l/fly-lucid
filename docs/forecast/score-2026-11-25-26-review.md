@@ -68,3 +68,13 @@ The structural defect was zero-width intervals: six matched tail-adjusted rows h
 - Server: TypeScript build clean; **65/65 tests passing**.
 - Web: TypeScript + Vite production build clean; FindPage visually checked in Chromium with p50, window, `safe_by`, and data age rendered.
 - 8–17 Nov walk-forward after final changes: all-leg MAE **42.9**, blend MAE **29.8**, history-only MAE **30.1**, coverage **79%**, width **118.6**.
+
+## Second-wave addendum (28 Nov morning)
+
+- **Forecast audit log:** `forecast_log` and `forecast_outcome` are live; `/api/search` stamps `live-v3-2026-11-28`, raw p10/p50/p90/safe_by, tail state, and `event_max_id`. `resolve-forecast-outcomes.mjs` matched a live P47860 forecast (p50 07:45, actual 07:40, residual −5 min, inside interval, not early).
+- **Board parameters:** K 5→2 and blend weight 0.65→0.50 after a 20-combination leak-free sweep. Final 8–17 Nov: all-leg MAE **41.6** (was 42.9), blend **29.0** (was 29.8), history-only **29.1**, coverage **79%**, width **117.7**. Retrospective 25/26 Nov MAE **40.7 / 50.4** (was 41.5 / 52.4).
+- **Live model guards:** off-slot latest observations can no longer wrap into a false positive residual; safeBy keeps the pre-shift safety tier; `n` reports slot-local evidence; ranking ties use unshifted p50; tail guards now block null-flight, stale, conflicting, and stale-observation states.
+- **Poller recovery:** null takeoff origins within 8 nm of a seeded airport are recovered instead of dropped; invalid touchdown destinations remain untouched because none were recoverable in the audit.
+- **Web performance/accessibility:** route code splitting reduced the initial JS from ~1.41 MB to **322 KB**; MapLibre is a separate 1.06 MB lazy chunk. Airborne/ground now differ by shape as well as color.
+- **Truthfulness follow-ups:** FindPage surfaces watchlist storage failures and no longer prints a numeric early-rate promise; WatchPage carries stale-feed state, real insufficient counts, honest check-failure state, and race-safe row merges; corrupt watchlist storage is not silently overwritten.
+- **Verification:** server build + **75/75 tests**, web production build, live forecast/outcome smoke, and final parameter backtest all green.
