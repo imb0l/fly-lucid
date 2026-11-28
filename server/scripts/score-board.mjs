@@ -158,8 +158,12 @@ console.log(`| Matched, no real departure (unscored) | ${unscored.length}: ${Obj
 console.log('\n## Accuracy (scored legs only)\n');
 console.log('| Subset | n | MAE vs p50 (min) | Median abs err | Bias | MAE vs schedule | p10–p90 coverage | Mean width |');
 console.log('|---|---|---|---|---|---|---|---|');
-const all = row(scored);
-console.log(`| All | ${all.n} | ${fmt(all.mae)} | ${fmt(all.med)} | ${fmt(all.bias, 0)} | ${fmt(all.schedMae)} | ${fmt(all.cov, 0)}% | ${fmt(all.width, 0)} |`);
+if (scored.length > 0) {
+  const all = row(scored);
+  console.log(`| All | ${all.n} | ${fmt(all.mae)} | ${fmt(all.med)} | ${fmt(all.bias, 0)} | ${fmt(all.schedMae)} | ${fmt(all.cov, 0)}% | ${fmt(all.width, 0)} |`);
+} else {
+  console.log('| All | 0 | n/a | n/a | n/a | n/a | n/a | n/a |');
+}
 for (const m of [...new Set(scored.map((p) => p.b.method))].sort()) {
   const s = row(scored.filter((p) => p.b.method === m));
   console.log(`| ${m} | ${s.n} | ${fmt(s.mae)} | ${fmt(s.med)} | ${fmt(s.bias, 0)} | ${fmt(s.schedMae)} | ${fmt(s.cov, 0)}% | ${fmt(s.width, 0)} |`);

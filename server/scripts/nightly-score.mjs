@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import Database from 'better-sqlite3';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
 const day = process.argv[2];
@@ -14,6 +15,7 @@ if (!/^\d{4}-\d{2}-\d{2}$/.test(day ?? '')) {
 
 const forecastDir = path.join(ROOT, 'docs/forecast');
 const scorer = path.join(ROOT, 'server/scripts/score-board.mjs');
+const resolver = path.join(ROOT, 'server/scripts/resolve-forecast-outcomes.mjs');
 const exact = `board-${day}.md`;
 const boards = fs.readdirSync(forecastDir)
   .filter((f) => f === exact || (f.startsWith(`board-${day}-`) && f.endsWith('.md')))
@@ -24,6 +26,44 @@ if (!boards.length) {
 }
 
 const sections = [];
+
+execFileSync(process.execPath, [resolver, day], {
+  cwd: ROOT, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
+});
+
+const db = new Database(path.join(ROOT, 'server/data/fly.db'), { readonly: true });
+const safetyRows = db.prepare(`
+  SELECT l.model_version, COUNT(*) AS n, COALESCE(SUM(o.early), 0) AS early
+  FROM forecast_outcome o
+  JOIN forecast_log l ON l.id = o.forecast_id
+  WHERE l.target_date = ? AND o.outcome = 'matched' AND l.safe_by IS NOT NULL
+  GROUP BY l.model_version
+  ORDER BY l.model_version
+`).all(day);
+db.close();
+
+const wilson = (early, n) => {
+  if (n === 0) return 'n/a';
+  const z = 1.959963984540054;
+  const p = early / n;
+  const denom = 1 + (z * z) / n;
+  const center = (p + (z * z) / (2 * n)) / denom;
+  const half = (z * Math.sqrt((p * (1 - p) + (z * z) / (4 * n)) / n)) / denom;
+  return `${(100 * Math.max(0, center - half)).toFixed(1)}–${(100 * Math.min(1, center + half)).toFixed(1)}%`;
+};
+
+const totalN = safetyRows.reduce((sum, row) => sum + row.n, 0);
+const totalEarly = safetyRows.reduce((sum, row) => sum + row.early, 0);
+const safetySection = [
+  '## safe_by calibration (live `/api/search` audit log)',
+  '',
+  `Matched forecasts with a recorded safe_by: **${totalN}**. Early departures: **${totalEarly}** (${totalN ? (100 * totalEarly / totalN).toFixed(1) : '0.0'}%; Wilson 95% CI ${wilson(totalEarly, totalN)}).`,
+  '',
+  '| Model version | Matched | Early | Early rate | Wilson 95% CI |',
+  '|---|---|---|---|---|',
+  ...safetyRows.map((row) => `| ${row.model_version} | ${row.n} | ${row.early} | ${(100 * row.early / row.n).toFixed(1)}% | ${wilson(row.early, row.n)} |`),
+  '',
+].join('\n');
 const summary = [];
 for (const board of boards) {
   const out = execFileSync(process.execPath, [scorer, path.join(forecastDir, board), day, '--db'], {
@@ -40,8 +80,9 @@ for (const board of boards) {
 const report = [
   `# Nightly score — ${day} (WAT)`,
   '',
-  'Ground truth: poller db `server/data/fly.db` (readonly). One section per frozen board; tables preserved verbatim from `score-board.mjs --db`.',
+  'Forecast outcomes are resolved first; the safe_by section reports early departures with Wilson 95% intervals. Unmatched forecasts remain unscored, never invented cancellations.',
   '',
+  safetySection,
   ...sections.flatMap((s) => [s, '']),
 ].join('\n');
 
