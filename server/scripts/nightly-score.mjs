@@ -9,7 +9,12 @@ import Database from 'better-sqlite3';
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
 const day = process.argv[2];
 if (!/^\d{4}-\d{2}-\d{2}$/.test(day ?? '')) {
-  console.error('usage: node server/scripts/nightly-score.mjs <YYYY-MM-DD>');
+  console.error('usage: node server/scripts/nightly-score.mjs <YYYY-MM-DD> [prospectiveAfter HH:MM]');
+  process.exit(2);
+}
+const prospectiveAfter = process.argv[3] ?? null;
+if (prospectiveAfter !== null && !/^([01]\d|2[0-3]):[0-5]\d$/.test(prospectiveAfter)) {
+  console.error('prospectiveAfter must be HH:MM in WAT');
   process.exit(2);
 }
 
@@ -66,21 +71,27 @@ const safetySection = [
 ].join('\n');
 const summary = [];
 for (const board of boards) {
-  const out = execFileSync(process.execPath, [scorer, path.join(forecastDir, board), day, '--db'], {
-    cwd: ROOT, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
-  }).trimEnd();
-  // Drop the per-board H1 (the report supplies its own heading); all tables stay verbatim.
-  const body = (out.startsWith('# Board score') ? out.slice(out.indexOf('\n') + 1) : out).replace(/^\n+/, '');
-  sections.push(`## ${board}\n\n${body}`);
-  const legs = /^\| Board legs \| (\d+) \|$/m.exec(body)?.[1] ?? '?';
-  const all = /^\| All \| (\d+) \| ([-\d.]+) \|/m.exec(body);
-  summary.push(`${board}: ${legs} legs, ${all?.[1] ?? '?'} scored, MAE ${all?.[2] ?? '?'} min`);
+  const locked = board.includes('-locked-') || board.includes('-live-lock-');
+  const variants = [{ suffix: '', args: [] }];
+  if (locked && prospectiveAfter !== null) {
+    variants.push({ suffix: ` — prospective >= ${prospectiveAfter} WAT`, args: ['--after', prospectiveAfter] });
+  }
+  for (const variant of variants) {
+    const out = execFileSync(process.execPath, [scorer, path.join(forecastDir, board), day, '--db', ...variant.args], {
+      cwd: ROOT, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
+    }).trimEnd();
+    const body = (out.startsWith('# Board score') ? out.slice(out.indexOf('\n') + 1) : out).replace(/^\n+/, '');
+    sections.push(`## ${board}${variant.suffix}\n\n${body}`);
+    const legs = /^\| Board legs \| (\d+) \|$/m.exec(body)?.[1] ?? '?';
+    const all = /^\| All \| (\d+) \| ([-\d.]+) \|/m.exec(body);
+    summary.push(`${board}${variant.suffix}: ${legs} legs, ${all?.[1] ?? '?'} scored, MAE ${all?.[2] ?? '?'} min`);
+  }
 }
 
 const report = [
   `# Nightly score — ${day} (WAT)`,
   '',
-  'Forecast outcomes are resolved first; the safe_by section reports early departures with Wilson 95% intervals. Unmatched forecasts remain unscored, never invented cancellations.',
+  'Forecast outcomes are resolved first; the safe_by section reports early departures with Wilson 95% intervals. Locked boards are also scored separately for departures at or after the supplied prospective cutoff; earlier legs remain retrospective. Unmatched forecasts remain unscored, never invented cancellations.',
   '',
   safetySection,
   ...sections.flatMap((s) => [s, '']),

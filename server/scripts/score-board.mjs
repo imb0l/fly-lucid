@@ -15,7 +15,7 @@ const boardPath = process.argv[2];
 const day = process.argv[3];
 const dataDir = process.argv[4] && !process.argv[4].startsWith('--') ? process.argv[4] : path.join(ROOT, 'data');
 if (!boardPath || !day) {
-  console.error('usage: node server/scripts/score-board.mjs <board.md> <YYYY-MM-DD> [dataDir] [--db | --csv-in <csv>] [--csv <out>]');
+  console.error('usage: node server/scripts/score-board.mjs <board.md> <YYYY-MM-DD> [dataDir] [--db | --csv-in <csv>] [--csv <out>] [--after HH:MM]');
   process.exit(2);
 }
 const MATCH_BEFORE_SEC = 6 * 3600;
@@ -24,12 +24,20 @@ const [Y, M, D] = day.split('-').map(Number);
 const DAY_START_UTC = Date.UTC(Y, M - 1, D) / 1000 - 3600; // WAT = UTC+1
 const minuteOfDay = (hm) => { const [h, m] = hm.split(':').map(Number); return h * 60 + m; };
 const tsOf = (hm) => DAY_START_UTC + minuteOfDay(hm) * 60; // hm is WAT wall clock
+const afterIdx = process.argv.indexOf('--after');
+const afterArg = afterIdx === -1 ? null : process.argv[afterIdx + 1];
+const afterMin = afterArg === null ? null : /^([01]\d|2[0-3]):[0-5]\d$/.test(afterArg) ? minuteOfDay(afterArg) : NaN;
+if (afterMin !== null && !Number.isFinite(afterMin)) {
+  console.error('--after must be HH:MM in WAT');
+  process.exit(2);
+}
 const watOf = (ts) => { const m = Math.round((ts - DAY_START_UTC) / 60); return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`; };
 
 const legs = [];
 for (const line of fs.readFileSync(boardPath, 'utf8').split('\n')) {
   if (!/^\| \d\d:\d\d \|/.test(line)) continue;
   const [sched, flt, route, carrier, p50, win, method, n] = line.trim().replace(/^\||\|$/g, '').split('|').map((s) => s.trim());
+  if (afterMin !== null && minuteOfDay(sched) < afterMin) continue;
   const [o, d] = route.split('-');
   const [lo, hi] = win.split('-');
   legs.push({ sched, flt, orig: o, dest: d, carrier, p50, win, method, n: Number(n), schedTs: tsOf(sched), p50Ts: tsOf(p50), loTs: tsOf(lo), hiTs: tsOf(hi) });
@@ -144,6 +152,7 @@ const row = (pairs) => {
 const fmt = (x, d = 1) => x.toFixed(d);
 
 console.log(`# Board score — ${day} (WAT)\n`);
+if (afterMin !== null) console.log(`Prospective subset: scheduled at or after ${afterArg} WAT.\n`);
 if (fromDb) console.log(`Board: \`${path.relative(ROOT, boardPath)}\`  Poller actuals: \`${path.relative(ROOT, path.join(ROOT, 'server/data/fly.db'))}\`\n`);
 else console.log(`Board: \`${path.relative(ROOT, boardPath)}\`  FR24 pages: \`${path.relative(ROOT, dataDir)}/fr24-${day.slice(8, 10)}${['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'][M - 1]}-hist-*.json\`\n`);
 console.log('| Join step | Legs |');
